@@ -21,6 +21,7 @@ Metra 是一个面向 Linux 和 macOS 的终端系统监控工具。用类似任
 ```sh
 curl -fsSLO https://github.com/raywcm/metra/releases/latest/download/install.sh
 sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 metra
 ```
 

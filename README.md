@@ -21,6 +21,7 @@ Download a binary from [Releases](https://github.com/raywcm/metra/releases), or 
 ```sh
 curl -fsSLO https://github.com/raywcm/metra/releases/latest/download/install.sh
 sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 metra
 ```
 
