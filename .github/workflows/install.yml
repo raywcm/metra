@@ -1,0 +1,26 @@
+name: installation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the published archive
+        run: |
+          METRA_PREFIX="$RUNNER_TEMP/metra-install" METRA_VERSION="$(cat internal/buildinfo/VERSION)" sh install.sh
+          "$RUNNER_TEMP/metra-install/bin/metra" --version
+          "$RUNNER_TEMP/metra-install/bin/metra" --snapshot
+      - name: Install through Homebrew
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew tap raywcm/metra https://github.com/raywcm/metra
+          brew install raywcm/metra/metra
+          brew test raywcm/metra/metra
+          metra --version
+          metra --snapshot
