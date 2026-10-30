@@ -27,6 +27,7 @@ args.output.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='metra-record-') as temporary, args.output.open('w') as output:
     output.write(json.dumps({'version': 2, 'width': 120, 'height': 36,
                              'host': socket.gethostname(), 'user': getpass.getuser()}) + '\n')
+    output.flush()
     start = time.monotonic()
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
     pid, fd = pty.fork()

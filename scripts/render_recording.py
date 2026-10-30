@@ -20,7 +20,11 @@ renderer = Renderer(args.font, size=14)
 redactions = tuple({metadata.get('host', ''), metadata.get('host', '').split('.')[0], metadata.get('user', '')} - {''})
 frames, captures = [], {}
 for line in records:
-    _, kind, data = json.loads(line)
+    record = json.loads(line)
+    if isinstance(record, dict):
+        assert record == metadata, 'recording metadata changed midstream'
+        continue
+    _, kind, data = record
     if kind == 'o':
         stream.feed(data.encode())
     elif kind == 'r':
