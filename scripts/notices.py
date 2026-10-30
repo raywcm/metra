@@ -24,7 +24,7 @@ for m in modules:
         downloaded=json.loads(subprocess.check_output([os.environ.get('GO','go'),'mod','download','-json',path+'@'+version],text=True))
         m['Dir']=downloaded['Dir']
     directory = Path(m['Dir'])
-    files = [p for p in directory.iterdir() if p.is_file() and p.name.lower().startswith(('license', 'copying', 'notice'))]
+    files = sorted(p for p in directory.iterdir() if p.is_file() and p.name.lower().startswith(('license', 'copying', 'notice')))
     assert files, f'No license found for {path}'
     dest = Path('licenses') / f'{path.replace("/", "_")}@{version}'
     for p in sorted(files):

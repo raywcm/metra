@@ -1,6 +1,6 @@
 # Release builds
 
-The version lives in `internal/buildinfo/VERSION`. Source builds, the settings page and snapshot packages all use it. Release tags must match the file, for example `v0.7.0`.
+The version lives in `internal/buildinfo/VERSION`. Source builds, the settings page and snapshot packages all use it. Release tags must match the file, for example `v0.7.1`.
 
 ## Build locally
 
@@ -39,7 +39,7 @@ The formula must refer to the same published archives as the release. Do not cop
 
 ```sh
 sh install.sh
-METRA_VERSION=0.7.0 METRA_PREFIX="$HOME/.local" sh install.sh
+METRA_VERSION=0.7.1 METRA_PREFIX="$HOME/.local" sh install.sh
 ```
 
 `METRA_REPO` overrides the release repository. Checksums verify transfer integrity; they are not publisher signatures.
