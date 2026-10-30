@@ -1,0 +1,31 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+  release:
+    runs-on: ubuntu-24.04
+    needs: verify
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check release version
+        run: test "$GITHUB_REF_NAME" = "v$(cat internal/buildinfo/VERSION)"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: v2.19.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: python3 scripts/homebrew.py dist
+      - run: gh release upload "$GITHUB_REF_NAME" dist/homebrew/metra.rb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

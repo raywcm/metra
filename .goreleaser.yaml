@@ -1,0 +1,57 @@
+version: 2
+project_name: metra
+builds:
+  - id: metra
+    main: ./cmd/metra
+    binary: metra
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ['-s -w -X main.version={{.Version}}']
+archives:
+  - formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files: [README.md, README.zh-CN.md, CONTRIBUTING.md, LICENSE, THIRD_PARTY_NOTICES.md, 'licenses/**', 'docs/*.md', 'docs/assets/*', install.sh, internal/buildinfo/VERSION]
+nfpms:
+  - id: linux
+    package_name: metra
+    maintainer: raywcm
+    homepage: https://github.com/raywcm/metra
+    license: MIT
+    description: Lightweight terminal system monitor for Linux and macOS
+    formats: [deb, rpm, archlinux]
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/metra/README.md
+      - src: README.zh-CN.md
+        dst: /usr/share/doc/metra/README.zh-CN.md
+      - src: CONTRIBUTING.md
+        dst: /usr/share/doc/metra/CONTRIBUTING.md
+      - src: LICENSE
+        dst: /usr/share/doc/metra/LICENSE
+      - src: internal/buildinfo/VERSION
+        dst: /usr/share/doc/metra/internal/buildinfo/VERSION
+      - src: THIRD_PARTY_NOTICES.md
+        dst: /usr/share/doc/metra/THIRD_PARTY_NOTICES.md
+      - src: licenses
+        dst: /usr/share/doc/metra/licenses
+        type: tree
+      - src: docs
+        dst: /usr/share/doc/metra/docs
+        type: tree
+checksum:
+  name_template: checksums.txt
+snapshot:
+  version_template: '{{ mustReadFile "internal/buildinfo/VERSION" | trim }}'
+changelog:
+  disable: true
+release:
+  github:
+    owner: raywcm
+    name: metra
+  extra_files:
+    - glob: install.sh

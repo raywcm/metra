@@ -1,0 +1,14 @@
+//go:build linux
+
+package platform
+
+import "testing"
+
+func TestDefaultRouteInterfaces(t *testing.T) {
+	v4 := "eth0 00000000 0100000A 0003 0 0 100 00000000 0 0 0\neth1 00000000 00000000 0001 0 0 0 000000FF 0 0 0\ndown0 00000000 00000000 0000 0 0 0 00000000 0 0 0"
+	v6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000001 enp1s0"
+	got := defaultInterfaces(v4, v6)
+	if !got["eth0"] || !got["enp1s0"] || len(got) != 2 {
+		t.Fatal(got)
+	}
+}
