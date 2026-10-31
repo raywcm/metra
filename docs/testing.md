@@ -31,7 +31,7 @@ The Linux resource tests use temporary proc / cgroup fixtures for v1, v2, nested
 
 Accelerator tests use parser fixtures by default. Live NVIDIA checks require `METRA_TEST_NVIDIA=1`; Apple and Ascend PTY checks have explicit flags listed in [CONTRIBUTING.md](../CONTRIBUTING.md). Missing hardware does not count as a successful hardware check.
 
-The code has been exercised on Apple M2, an 8×RTX 5090 host, an H200 / H100 host, Ascend 910B3 and a Raspberry Pi. Those checks establish behavior on those systems, not universal driver compatibility.
+Live checks cover Linux and macOS. Available metrics depend on the host and driver.
 
 ## Benchmarks and recordings
 

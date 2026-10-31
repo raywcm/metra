@@ -4,15 +4,13 @@
 
 Metra is a terminal system monitor for Linux and macOS. It puts hardware charts and processes in task-manager-style tabs, and works over SSH.
 
-**Linux · NVIDIA H200 / H100**
+**Linux**
 
-![Metra on an H200 / H100 server](docs/assets/demo-h200.gif)
+![Metra on Linux](docs/assets/demo-linux.gif)
 
-**macOS · Apple M2**
+**macOS**
 
 ![Metra running on macOS](docs/assets/demo-macos.gif)
-
-Both demos use live system data. Host and user labels are hidden.
 
 ## Install
 

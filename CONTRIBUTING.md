@@ -36,9 +36,9 @@ python3 -m venv .venv
 .venv/bin/python scripts/demo.py bin/metra
 ```
 
-This records an actual PTY session, sends navigation keys, and renders its cells to `docs/assets/demo.gif`. It uses live samples and hides host / user labels. The default font is Menlo on macOS; pass `--font /path/to/monospace.ttf` on Linux.
+This records an actual PTY session, sends navigation keys, and renders its cells to `docs/assets/demo-macos.gif`. It uses live samples and hides host / user labels. The default font is Menlo on macOS; pass `--font /path/to/monospace.ttf` on Linux.
 
-For a remote NVIDIA host, `scripts/record.py BINARY OUTPUT.cast` needs only Python 3. Copy the recording back, then run `scripts/render_recording.py OUTPUT.cast docs/assets/demo-h200.gif` in the demo virtual environment. Raw recordings can contain host details and are ignored by Git.
+For a remote NVIDIA host, `scripts/record.py BINARY OUTPUT.cast` needs only Python 3. Copy the recording back, then run `scripts/render_recording.py OUTPUT.cast docs/assets/demo-linux.gif` in the demo virtual environment. Raw recordings can contain host details and are ignored by Git.
 
 ## Pull requests
 

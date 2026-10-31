@@ -4,15 +4,13 @@
 
 Metra 是一个面向 Linux 和 macOS 的终端系统监控工具。用类似任务管理器的标签页查看硬件和进程，也可以通过 SSH 使用。
 
-**Linux · NVIDIA H200 / H100**
+**Linux**
 
-![H200 / H100 服务器演示](docs/assets/demo-h200.gif)
+![Linux 运行演示](docs/assets/demo-linux.gif)
 
-**macOS · Apple M2**
+**macOS**
 
 ![Mac 运行演示](docs/assets/demo-macos.gif)
-
-两段演示均录自实际运行的程序，使用实时系统数据；主机和用户标签已隐藏。
 
 ## 安装
 

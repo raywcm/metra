@@ -18,7 +18,7 @@ from terminal import Renderer, Screen, Stream
 
 parser = argparse.ArgumentParser()
 parser.add_argument('binary', nargs='?', default='bin/metra')
-parser.add_argument('--output', type=Path, default=Path('docs/assets/demo.gif'))
+parser.add_argument('--output', type=Path, default=Path('docs/assets/demo-macos.gif'))
 parser.add_argument('--font', default='/System/Library/Fonts/Menlo.ttc')
 args = parser.parse_args()
 binary = str(Path(args.binary).resolve())
