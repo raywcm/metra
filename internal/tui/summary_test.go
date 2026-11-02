@@ -47,6 +47,7 @@ func TestCompactFooterAndProcessSummary(t *testing.T) {
 
 func TestSwapUsageColorAndMemorySummary(t *testing.T) {
 	background := regexp.MustCompile(`\x1b\[[0-9;]*48;(2|5);[0-9;]*m`)
+	foreground := regexp.MustCompile(`\x1b\[[0-9;]*38;(2|5);[0-9;]*m`)
 	for _, language := range []string{"en", "zh-CN"} {
 		m, _ := model(t)
 		m.settings.Language = language
@@ -69,9 +70,12 @@ func TestSwapUsageColorAndMemorySummary(t *testing.T) {
 				if !strings.Contains(ansi.Strip(line), expected) {
 					continue
 				}
-				color := background.FindString(line)
+				if background.MatchString(line) {
+					t.Fatal("swap must not have a usage background", language, line)
+				}
+				color := foreground.FindString(line)
 				if color == "" || color == previous {
-					t.Fatal("swap background did not reflect usage", language, used, line)
+					t.Fatal("swap text color did not reflect usage", language, used, line)
 				}
 				previous, found = color, true
 			}

@@ -408,7 +408,7 @@ func (m *Model) memoryView(w, h int) string {
 		if s.SwapTotal > 0 {
 			usage = float64(s.SwapUsed) / float64(s.SwapTotal) * 100
 		}
-		used := m.heatStyle(usage, p.memory).Render(bytes(float64(s.SwapUsed)))
+		used := m.usageTextStyle(usage).Render(bytes(float64(s.SwapUsed)))
 		values = append(values, m.tr("Swap %s / %s", used, bytes(float64(s.SwapTotal))))
 	}
 	bar := ""

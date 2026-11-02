@@ -47,3 +47,22 @@ func (m *Model) heatStyle(value float64, base lipgloss.Style) lipgloss.Style {
 func (m *Model) heatPercent(value float64, base lipgloss.Style) string {
 	return m.heatStyle(value, base).Render(percent(value))
 }
+
+// Swap changes only the text color: green through amber to red as it fills.
+func (m *Model) usageTextStyle(value float64) lipgloss.Style {
+	p := m.palette()
+	if !finite(value) || value < 0 {
+		return p.text.UnsetBackground()
+	}
+	value = math.Min(100, value)
+	low, high, fraction := p.network, p.disk, value/50
+	if value > 50 {
+		low, high, fraction = p.disk, p.danger, (value-50)/50
+	}
+	r0, g0, b0, _ := low.GetForeground().RGBA()
+	r1, g1, b1, _ := high.GetForeground().RGBA()
+	mix := func(a, b uint32) int {
+		return int(math.Round(float64(a>>8)*(1-fraction) + float64(b>>8)*fraction))
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", mix(r0, r1), mix(g0, g1), mix(b0, b1))))
+}
