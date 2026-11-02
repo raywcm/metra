@@ -82,6 +82,7 @@ try:
     resize(120, 36)
     startup = drain(3.0)
     assert label('Performance','性能总览') in startup and b'CPU' in startup, 'missing overview'
+    assert label('LIVE','实时') not in startup, 'redundant live status still visible'
     assert not any(0x2800 <= ord(c) <= 0x28ff for c in startup.decode('utf-8','replace')), 'obsolete Braille chart output'
     assert b'100%' not in startup, 'full-scale label should be hidden'
     assert label('CPU capacity','可用 CPU 配额') not in startup and label('Shared host','共享主机') not in startup, 'resource quota summary should be hidden'
@@ -204,7 +205,7 @@ try:
     paused=send(b' ')
     assert label('PAUSED','已暂停') in paused, 'space did not pause sampling'
     resumed=send(b' ')
-    assert label('LIVE','实时') in resumed, 'space did not resume sampling'
+    assert resumed and label('PAUSED','已暂停') not in resumed, 'space did not clear paused status'
     send(b'?')
     send(b'\x1b')
     if args.exit_method=='sigterm':

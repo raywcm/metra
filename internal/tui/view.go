@@ -30,10 +30,6 @@ func (m *Model) View() tea.View {
 		if host == "" {
 			host = m.tr("local system")
 		}
-		state := m.tr("LIVE")
-		if m.paused {
-			state = m.tr("PAUSED")
-		}
 		header := fit(p.accent.Render(" metra ")+p.text.Render(m.pageHint()), w)
 		if m.current().Kind == "settings" {
 			header = fit(p.accent.Render(" metra v"+m.version)+" · "+p.text.Render(m.pageHint())+" "+p.muted.Render(m.status), w)
@@ -77,7 +73,10 @@ func (m *Model) View() tea.View {
 		if m.current().Kind == "settings" {
 			info = m.tr("Settings file: %s", clean(m.configPath))
 		} else {
-			info = host + " · " + state + " · " + info
+			if m.paused {
+				host += " · " + m.tr("PAUSED")
+			}
+			info = host + " · " + info
 		}
 		parts := []string{header, m.tabBar(w)}
 		if full {
@@ -404,17 +403,13 @@ func (m *Model) memoryView(w, h int) string {
 	}
 	known := s.UsageKnown || (!s.Limited && s.Total > 0 && finite(s.Percent))
 	var values []string
-	if known {
-		values = append(values, m.tr("Used %s", bytes(float64(s.Used))))
-	}
-	if s.AvailableKnown || (!s.Limited && s.Total > 0) {
-		values = append(values, m.tr("Available %s", bytes(float64(s.Available))))
-	}
-	if s.CachedKnown {
-		values = append(values, m.tr("Cached %s", bytes(float64(s.Cached))))
-	}
 	if s.SwapKnown {
-		values = append(values, m.tr("Swap %s / %s", bytes(float64(s.SwapUsed)), bytes(float64(s.SwapTotal))))
+		usage := math.NaN()
+		if s.SwapTotal > 0 {
+			usage = float64(s.SwapUsed) / float64(s.SwapTotal) * 100
+		}
+		used := m.heatStyle(usage, p.memory).Render(bytes(float64(s.SwapUsed)))
+		values = append(values, m.tr("Swap %s / %s", used, bytes(float64(s.SwapTotal))))
 	}
 	bar := ""
 	if known && finite(s.Percent) && w >= 24 && h >= 14 {
@@ -504,9 +499,9 @@ func (m *Model) diskView(i, w, h int) string {
 		{labels: []string{p.disk.Render(label + " " + percent(d.CombinedBusy))}, numericLabels: []string{p.disk.Render(label+" ") + m.heatPercent(d.CombinedBusy, p.disk)}, keys: []string{"disk:" + d.ID + ":combined"}, limit: 100, style: p.disk},
 		{labels: []string{p.disk.Render(m.tr("Read %s", speed(d.ReadRate))), p.network.Render(m.tr("Write %s", speed(d.WriteRate)))}, keys: []string{"disk:" + d.ID + ":read", "disk:" + d.ID + ":write"}, style: p.disk, priority: 1},
 	}
-	values := []string{m.diskTimes(i), m.tr("Total read %s · Total written %s", bytes(float64(d.ReadBytes)), bytes(float64(d.WriteBytes)))}
+	values := []string{m.tr("Total read %s · Total written %s", bytes(float64(d.ReadBytes)), bytes(float64(d.WriteBytes)))}
 	for _, v := range d.Mounts {
-		values = append(values, m.tr("%s (%s) · %s / %s used · %s free", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total)), bytes(float64(v.Free))))
+		values = append(values, m.tr("%s (%s) · %s / %s used", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
 	}
 	if i == 0 {
 		for _, v := range m.snapshot.Volumes {
@@ -831,9 +826,12 @@ func (m *Model) npuView(i, w, h int) string {
 }
 func (m *Model) processView(w, h int) string {
 	p := m.palette()
-	mode := m.tr("list")
+	summary := fmt.Sprint(len(m.rows))
+	if len(m.rows) != m.snapshot.ProcessCount {
+		summary = fmt.Sprintf("%d/%d", len(m.rows), m.snapshot.ProcessCount)
+	}
 	if m.tree {
-		mode = m.tr("tree (siblings sorted)")
+		summary += " · " + m.tr("tree (siblings sorted)")
 	}
 	arrow := m.processSortArrow()
 	order := m.tr(m.sortBy) + " " + arrow
@@ -842,7 +840,7 @@ func (m *Model) processView(w, h int) string {
 	} else if m.sortBy == "memory" {
 		order += " · CPU " + arrow
 	}
-	lines := []string{m.title(m.tr("Processes"), m.tr("%d shown / %d total · %s · sort: %s", len(m.rows), m.snapshot.ProcessCount, mode, order))}
+	lines := []string{m.title(m.tr("Processes"), summary+" · "+m.tr("sort: %s", order))}
 	if m.searching {
 		lines = append(lines, m.input.View())
 	} else if m.query != "" {
@@ -1002,21 +1000,6 @@ func (m *Model) pageHint() string {
 		return common + " · " + extra
 	}
 	return common
-}
-
-func (m *Model) diskTimes(i int) string {
-	d := m.snapshot.Disks[i]
-	var values []string
-	if finite(d.ReadBusy) {
-		values = append(values, m.tr("Read time %s", percent(d.ReadBusy)))
-	}
-	if finite(d.WriteBusy) {
-		values = append(values, m.tr("Write time %s", percent(d.WriteBusy)))
-	}
-	if finite(d.Busy) {
-		values = append(values, m.tr("Active %s", percent(d.Busy)))
-	}
-	return strings.Join(values, " · ")
 }
 
 func (m *Model) liveValue(v float64) string {
