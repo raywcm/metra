@@ -1,28 +1,28 @@
 class Metra < Formula
   desc "Lightweight terminal system monitor"
   homepage "https://github.com/raywcm/metra"
-  version "0.7.2"
+  version "0.7.3"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/raywcm/metra/releases/download/v0.7.2/metra_0.7.2_darwin_arm64.tar.gz"
-      sha256 "495f8ab74d0a1415abcde540f827e89c9630b8ccc43c393dae8ec39a3a2274bc"
+      url "https://github.com/raywcm/metra/releases/download/v0.7.3/metra_0.7.3_darwin_arm64.tar.gz"
+      sha256 "0d285bfa2b580bfdb3fa92fe76d196e05577b195c9b927fb878f1000f0089484"
     end
     on_intel do
-      url "https://github.com/raywcm/metra/releases/download/v0.7.2/metra_0.7.2_darwin_amd64.tar.gz"
-      sha256 "dc3f6eb3b7d13f0b903928b3c3264513cbb7f1b885eee45f31fd9e5b11a084e9"
+      url "https://github.com/raywcm/metra/releases/download/v0.7.3/metra_0.7.3_darwin_amd64.tar.gz"
+      sha256 "848c26f4d8e97e20764e56461d98b91a5a2d467e35c4540bf870fcabb7c1d360"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/raywcm/metra/releases/download/v0.7.2/metra_0.7.2_linux_arm64.tar.gz"
-      sha256 "d027c676e51dee1f13887ac40342888a2c645cefd4089e07a1fc32542411e24e"
+      url "https://github.com/raywcm/metra/releases/download/v0.7.3/metra_0.7.3_linux_arm64.tar.gz"
+      sha256 "b54da2e8a1a5b8c31ae30b2d1de2b803b2ed46817eb3c1d0cfdbe68f02732cb1"
     end
     on_intel do
-      url "https://github.com/raywcm/metra/releases/download/v0.7.2/metra_0.7.2_linux_amd64.tar.gz"
-      sha256 "9eb35a331ae478bdf06892d97c564936ab690c54966d02a13285d4acf8e8c7af"
+      url "https://github.com/raywcm/metra/releases/download/v0.7.3/metra_0.7.3_linux_amd64.tar.gz"
+      sha256 "f781c6db38691776540b3a4af4d43cbaa1067e0af04d505f0bf18d09007c2f4e"
     end
   end
 
