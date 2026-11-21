@@ -14,6 +14,7 @@ import (
 	"github.com/raywcm/metra/internal/i18n"
 	"github.com/raywcm/metra/internal/platform"
 	"github.com/raywcm/metra/internal/tui"
+	"io"
 	"math"
 	"os"
 	"os/signal"
@@ -114,55 +115,9 @@ func run(args []string) error {
 		second, c := context.WithTimeout(ctx, 5*time.Second)
 		defer c()
 		s := source.Sample(second, false)
-		fmt.Printf("metra %s · %s · %s/%s\nCPU: %s\n", version, s.Host, s.OS, s.Arch, percent(s.CPU.Percent))
-		if s.CPU.MHz > 0 && !math.IsNaN(s.CPU.MHz) {
-			fmt.Printf("CPU clock: %.1f MHz\n", s.CPU.MHz)
-		}
-		if s.CPU.TemperatureKnown {
-			fmt.Printf("CPU temperature: %.1f C\n", s.CPU.Temperature)
-		}
-		fmt.Printf("Memory: %s", memory(float64(s.Memory.Total)))
-		if s.Memory.UsageKnown {
-			fmt.Printf(" · used %s (%s)", memory(float64(s.Memory.Used)), percent(s.Memory.Percent))
-		}
-		if s.Memory.AvailableKnown {
-			fmt.Printf(" · available %s", memory(float64(s.Memory.Available)))
-		}
-		fmt.Println()
-		fmt.Printf("Disks: %d  Interfaces: %d  GPUs: %d  NPUs: %d  Processes: %d\n", len(s.Disks), len(s.Networks), len(s.GPUs), len(s.NPUs), s.ProcessCount)
-		for _, d := range s.Disks {
-			fmt.Print(i18n.Text(settings.Language, "Disk %s: read %s (%s) · write %s (%s)\n", d.Name, percent(d.ReadBusy), rate(d.ReadRate), percent(d.WriteBusy), rate(d.WriteRate)))
-		}
-		for _, g := range s.GPUs {
-			fmt.Printf("GPU %s: %s · memory %s · %s\n", g.Name, percent(g.Utilization), memory(g.MemoryUsed), g.Backend)
-			printEngines(g.Engines)
-			if !math.IsNaN(g.PCIeReceive) || !math.IsNaN(g.PCIeSend) {
-				fmt.Printf("  PCIe RX: %s · TX: %s\n", rate(g.PCIeReceive), rate(g.PCIeSend))
-			}
-			for _, clock := range []struct {
-				name  string
-				value float64
-			}{{"Graphics", g.GraphicsMHz}, {"SM", g.SMMHz}, {"Memory", g.MemoryMHz}, {"Video", g.VideoMHz}} {
-				if clock.value > 0 && !math.IsNaN(clock.value) {
-					fmt.Printf("  %s clock: %.1f MHz\n", clock.name, clock.value)
-				}
-			}
-		}
-		for _, n := range s.NPUs {
-			fmt.Printf("NPU %s: %s · %s\n", n.Name, percent(n.Utilization), n.Backend)
-			if n.MemoryTotal > 0 && !math.IsNaN(n.MemoryUsed) {
-				fmt.Printf("  %s memory: %s / %s\n", n.MemoryKind, memory(n.MemoryUsed), memory(n.MemoryTotal))
-			}
-			if !math.IsNaN(n.Temperature) {
-				fmt.Printf("  Temperature: %.1f C\n", n.Temperature)
-			}
-			if !math.IsNaN(n.Power) {
-				fmt.Printf("  Power: %.1f W\n", n.Power)
-			}
-			printEngines(n.Engines)
-		}
+		writeSnapshot(os.Stdout, s, settings.Language, version)
 		for _, w := range s.Warnings {
-			fmt.Fprintln(os.Stderr, "warning:", w)
+			fmt.Fprintln(os.Stderr, i18n.Text(settings.Language, "warning: %s", w))
 		}
 		return nil
 	}
@@ -173,11 +128,68 @@ func run(args []string) error {
 	return err
 }
 
-func printEngines(engines []platform.Engine) {
-	for _, engine := range engines {
-		if !math.IsNaN(engine.Utilization) {
-			fmt.Printf("  %s: %.1f%%\n", engine.Name, engine.Utilization)
+func writeSnapshot(w io.Writer, s collector.Snapshot, language, version string) {
+	tr := func(key string, args ...any) string { return i18n.Text(language, key, args...) }
+	line := func(key string, args ...any) { fmt.Fprintln(w, tr(key, args...)) }
+	engines := func(values []platform.Engine) {
+		for _, engine := range values {
+			if !math.IsNaN(engine.Utilization) {
+				line("  %s: %.1f%%", tr(engine.Name), engine.Utilization)
+			}
 		}
+	}
+
+	fmt.Fprintf(w, "metra %s · %s · %s/%s\n", version, s.Host, s.OS, s.Arch)
+	line("CPU: %s", percent(s.CPU.Percent))
+	if s.CPU.MHz > 0 && !math.IsNaN(s.CPU.MHz) {
+		line("CPU clock: %.1f MHz", s.CPU.MHz)
+	}
+	if s.CPU.TemperatureKnown {
+		line("CPU temperature: %.1f C", s.CPU.Temperature)
+	}
+	total := "—"
+	if s.Memory.Total > 0 || s.Limits.MemoryLimitKnown {
+		total = memory(float64(s.Memory.Total))
+	}
+	usage := tr("Memory: %s", total)
+	if s.Memory.UsageKnown {
+		usage += " · " + tr("used %s (%s)", memory(float64(s.Memory.Used)), percent(s.Memory.Percent))
+	}
+	if s.Memory.AvailableKnown {
+		usage += " · " + tr("available %s", memory(float64(s.Memory.Available)))
+	}
+	fmt.Fprintln(w, usage)
+	line("Disks: %d  Interfaces: %d  GPUs: %d  NPUs: %d  Processes: %d", len(s.Disks), len(s.Networks), len(s.GPUs), len(s.NPUs), s.ProcessCount)
+	for _, d := range s.Disks {
+		fmt.Fprint(w, tr("Disk %s: read %s (%s) · write %s (%s)\n", d.Name, percent(d.ReadBusy), rate(d.ReadRate), percent(d.WriteBusy), rate(d.WriteRate)))
+	}
+	for _, g := range s.GPUs {
+		line("GPU %s: %s · memory %s · %s", g.Name, percent(g.Utilization), memory(g.MemoryUsed), g.Backend)
+		engines(g.Engines)
+		if !math.IsNaN(g.PCIeReceive) || !math.IsNaN(g.PCIeSend) {
+			line("  PCIe RX: %s · TX: %s", rate(g.PCIeReceive), rate(g.PCIeSend))
+		}
+		for _, clock := range []struct {
+			label string
+			mhz   float64
+		}{{"Graphics", g.GraphicsMHz}, {"SM", g.SMMHz}, {"Memory", g.MemoryMHz}, {"Video", g.VideoMHz}} {
+			if clock.mhz > 0 && !math.IsNaN(clock.mhz) {
+				line("  %s clock: %.1f MHz", tr(clock.label), clock.mhz)
+			}
+		}
+	}
+	for _, n := range s.NPUs {
+		line("NPU %s: %s · %s", n.Name, percent(n.Utilization), n.Backend)
+		if n.MemoryTotal > 0 && !math.IsNaN(n.MemoryUsed) {
+			line("  %s memory: %s / %s", n.MemoryKind, memory(n.MemoryUsed), memory(n.MemoryTotal))
+		}
+		if !math.IsNaN(n.Temperature) {
+			line("  Temperature: %.1f C", n.Temperature)
+		}
+		if !math.IsNaN(n.Power) {
+			line("  Power: %.1f W", n.Power)
+		}
+		engines(n.Engines)
 	}
 }
 
