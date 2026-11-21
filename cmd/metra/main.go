@@ -79,11 +79,11 @@ func run(args []string) error {
 		}
 	}
 	settings, err := config.Load(path)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "metra: settings warning:", err, "(using defaults)")
-	}
 	if *language != "" {
 		settings.Language = *language
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.Text(settings.Language, "metra: settings warning: %s (using defaults)", err))
 	}
 	if *theme != "" {
 		settings.Theme = *theme
@@ -159,7 +159,10 @@ func writeSnapshot(w io.Writer, s collector.Snapshot, language, version string) 
 		usage += " · " + tr("available %s", memory(float64(s.Memory.Available)))
 	}
 	fmt.Fprintln(w, usage)
-	line("Disks: %d  Interfaces: %d  GPUs: %d  NPUs: %d  Processes: %d", len(s.Disks), len(s.Networks), len(s.GPUs), len(s.NPUs), s.ProcessCount)
+	disks := i18n.Count(len(s.Disks), !s.DiskInventoryUnavailable)
+	interfaces := i18n.Count(len(s.Networks), !s.NetworkInventoryUnavailable)
+	processes := i18n.Count(s.ProcessCount, !s.ProcessCountUnavailable)
+	line("Disks: %s  Interfaces: %s  GPUs: %d  NPUs: %d  Processes: %s", disks, interfaces, len(s.GPUs), len(s.NPUs), processes)
 	for _, d := range s.Disks {
 		fmt.Fprint(w, tr("Disk %s: read %s (%s) · write %s (%s)\n", d.Name, percent(d.ReadBusy), rate(d.ReadRate), percent(d.WriteBusy), rate(d.WriteRate)))
 	}

@@ -8,6 +8,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/raywcm/metra/internal/i18n"
 )
 
 type metricPanel struct {
@@ -252,10 +253,19 @@ func (m *Model) compactValue() string {
 			d := s.Disks[t.Index]
 			return m.tabLabel(t) + " " + m.heatPercent(d.CombinedBusy, p.disk) + " R " + speed(d.ReadRate) + " W " + speed(d.WriteRate)
 		}
+	case "volumes":
+		if len(s.Volumes) > 0 {
+			v := s.Volumes[0]
+			return clean(v.Path) + " · " + knownBytes(v.Used, !v.CapacityUnavailable) + " / " + knownBytes(v.Total, !v.CapacityUnavailable)
+		}
 	case "network":
-		return "↓ " + speed(networkRate(s.Networks, true)) + " ↑ " + speed(networkRate(s.Networks, false))
+		if len(s.Networks) == 0 {
+			return m.emptyNetworkMessage()
+		}
+		n := s.Networks[min(m.network, len(s.Networks)-1)]
+		return clean(n.Name) + " ↓ " + speed(n.ReceiveRate) + " ↑ " + speed(n.SendRate)
 	case "processes":
-		return m.tr("Processes") + " " + number(float64(s.ProcessCount))
+		return m.tr("Processes") + " " + i18n.Count(s.ProcessCount, !s.ProcessCountUnavailable)
 	}
 	return m.tabLabel(t)
 }
@@ -283,6 +293,9 @@ func (m *Model) processRowsVisible() int {
 }
 
 func (m *Model) hardwareScrollMax() int {
+	if m.height < 4 {
+		return 0
+	}
 	width, height, _ := bodySize(m.width, m.height)
 	return max(0, lineCount(m.page(width, height))-height)
 }

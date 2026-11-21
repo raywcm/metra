@@ -10,6 +10,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/raywcm/metra/internal/chart"
+	"github.com/raywcm/metra/internal/config"
+	"github.com/raywcm/metra/internal/i18n"
 	"github.com/raywcm/metra/internal/platform"
 )
 
@@ -27,6 +29,9 @@ func (m *Model) View() tea.View {
 		case m.current().Kind == "settings" && m.settingsEditing:
 			body, offset = m.settingsView(), m.setting+1
 		}
+		if m.paused && !m.help && m.modal == "" && !m.searching && !m.settingsEditing {
+			body = m.tr("PAUSED") + " · " + body
+		}
 		content = viewport(body, offset, w, h, 0)
 	} else {
 		full := w >= 40 && h >= 12
@@ -42,7 +47,7 @@ func (m *Model) View() tea.View {
 		body := m.tr("Collecting hardware information…")
 		if m.help || m.modal != "" {
 			body = m.overlayBody(bodyW)
-		} else if m.ready || m.current().Kind == "settings" {
+		} else if m.ready || m.current().Kind == "settings" || m.current().Kind == "processes" {
 			body = m.page(bodyW, areaH)
 		}
 		offset := 0
@@ -59,16 +64,16 @@ func (m *Model) View() tea.View {
 			if len(m.snapshot.Warnings) > 0 {
 				info = "⚠ " + clean(m.snapshot.Warnings[0])
 			} else if m.ready {
-				info = m.tr("%s · %s/%s · up %s · %d processes", clean(m.snapshot.OS), clean(m.snapshot.Kernel), m.snapshot.Arch, uptime(m.snapshot.Uptime), m.snapshot.ProcessCount)
+				info = m.tr("%s · %s/%s · up %s · %s processes", clean(m.snapshot.OS), clean(m.snapshot.Kernel), m.snapshot.Arch, uptime(m.snapshot.Uptime), i18n.Count(m.snapshot.ProcessCount, !m.snapshot.ProcessCountUnavailable))
 			}
 		}
 		if m.current().Kind == "settings" {
 			info = m.tr("Settings file: %s", clean(m.configPath))
 		} else {
-			if m.paused {
-				host += " · " + m.tr("PAUSED")
-			}
 			info = host + " · " + info
+		}
+		if m.paused {
+			info = m.tr("PAUSED") + " · " + info
 		}
 		parts := []string{header, m.tabBar(w)}
 		if full {
@@ -215,7 +220,9 @@ func (m *Model) graph(keys []string, w, h int, limit float64, style lipgloss.Sty
 		now = time.Now()
 	}
 	style = style.Background(lipgloss.Color(m.blockBackground()))
-	options := chart.Options{Width: w, Height: h, Max: limit, Now: now, Range: time.Duration(m.settings.RangeSeconds) * time.Second, Grid: m.settings.Grid, Fill: true, MaxGap: max(2*time.Second, 3*m.settings.Interval()), StyleLine: style.Render, StyleGrid: style.Render, StyleFill: style.Render}
+	// Gaps are recorded with the cadence in effect at collection time.
+	// Changing the interval must not redraw old segments.
+	options := chart.Options{Width: w, Height: h, Max: limit, Now: now, Range: time.Duration(m.settings.RangeSeconds) * time.Second, Grid: m.settings.Grid, Fill: true, MaxGap: sampleGap(config.MaxIntervalMS * time.Millisecond), StyleLine: style.Render, StyleGrid: style.Render, StyleFill: style.Render}
 	options.StyleEmpty = m.blockEmptyStyle().Render
 	gridColor := "#26354A"
 	if m.light() {
@@ -271,7 +278,7 @@ func joinPanels(panels []string) string {
 }
 func (m *Model) overview(w, h int) string {
 	p := m.palette()
-	s := m.snapshot
+	s := &m.snapshot
 	type card struct {
 		label, value string
 		keys         []string
@@ -287,11 +294,15 @@ func (m *Model) overview(w, h int) string {
 	for i, d := range s.Disks {
 		cards = append(cards, card{m.tr("Disk%d", i) + " · " + d.Name, percent(d.CombinedBusy) + " · R " + speed(d.ReadRate) + " W " + speed(d.WriteRate), []string{"disk:" + d.ID + ":combined"}, p.disk, 100, d.CombinedBusy})
 	}
-	networkKeys := []string{"net:total:rx", "net:total:tx"}
+	networkKeys := []string{"net:rx", "net:tx"}
+	networkLabel := m.tr("Network · %d interfaces", len(s.Networks))
+	if s.NetworkInventoryUnavailable {
+		networkLabel = m.tr("Network")
+	}
 	if len(s.Networks) == 0 {
 		networkKeys = nil
 	}
-	cards = append(cards, card{m.tr("Network · %d interfaces", len(s.Networks)), "↓ " + speed(networkRate(s.Networks, true)) + "  ↑ " + speed(networkRate(s.Networks, false)), networkKeys, p.network, 0, math.NaN()})
+	cards = append(cards, card{networkLabel, "↓ " + speed(networkRate(s, true)) + "  ↑ " + speed(networkRate(s, false)), networkKeys, p.network, 0, math.NaN()})
 	for i, g := range s.GPUs {
 		value := m.liveValue(g.Utilization)
 		if finite(g.MemoryUsed) {
@@ -511,19 +522,16 @@ func (m *Model) diskView(i, w, h int) string {
 	d := m.snapshot.Disks[i]
 	p := m.palette()
 	label := m.tr("Combined read/write utilization")
-	if !finite(d.Busy) {
+	if d.ServiceTimeOnly {
 		label = m.tr("Combined read/write service time")
 	}
 	panels := []metricPanel{
 		{labels: []string{p.disk.Render(label + " " + percent(d.CombinedBusy))}, numericLabels: []string{p.disk.Render(label+" ") + m.heatPercent(d.CombinedBusy, p.disk)}, keys: []string{"disk:" + d.ID + ":combined"}, limit: 100, style: p.disk},
 		{labels: []string{p.disk.Render(m.tr("Read %s", speed(d.ReadRate))), p.network.Render(m.tr("Write %s", speed(d.WriteRate)))}, keys: []string{"disk:" + d.ID + ":read", "disk:" + d.ID + ":write"}, style: p.disk, priority: 1},
 	}
-	values := []string{m.tr("Total read %s · Total written %s", bytes(float64(d.ReadBytes)), bytes(float64(d.WriteBytes)))}
+	values := []string{m.tr("Total read %s · Total written %s", knownBytes(d.ReadBytes, !d.CountersUnavailable), knownBytes(d.WriteBytes, !d.CountersUnavailable))}
 	for _, v := range d.Mounts {
-		values = append(values, m.tr("%s (%s) · %s / %s used", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
-	}
-	if i == 0 {
-		values = append(values, m.volumeDetails()...)
+		values = append(values, m.tr("%s (%s) · %s / %s used", clean(v.Path), clean(v.FSType), knownBytes(v.Used, !v.CapacityUnavailable), knownBytes(v.Total, !v.CapacityUnavailable)))
 	}
 	details := metricLines(values, w)
 	lines := []string{m.title(m.tr("Disk%d", i), d.Name), m.panelLayout(panels, w, h-1-len(details), 1)}
@@ -533,20 +541,29 @@ func (m *Model) diskView(i, w, h int) string {
 func (m *Model) volumeDetails() []string {
 	var details []string
 	for _, v := range m.snapshot.Volumes {
-		details = append(details, m.tr("Volume %s (%s) · %s / %s", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
+		details = append(details, m.tr("Volume %s (%s) · %s / %s", clean(v.Path), clean(v.FSType), knownBytes(v.Used, !v.CapacityUnavailable), knownBytes(v.Total, !v.CapacityUnavailable)))
 	}
 	return details
 }
 
+func (m *Model) emptyNetworkMessage() string {
+	if m.snapshot.NetworkInventoryUnavailable {
+		return m.tr("Network interfaces unavailable.")
+	}
+	return m.tr("No active network interfaces.")
+}
+
 func (m *Model) networkView(w, h int) string {
 	if len(m.snapshot.Networks) == 0 {
-		return m.tr("Network") + "\n" + m.tr("No active network interfaces.")
+		return m.tr("Network") + "\n" + m.emptyNetworkMessage()
 	}
 	i := min(m.network, len(m.snapshot.Networks)-1)
 	n := m.snapshot.Networks[i]
 	p := m.palette()
 	state := m.tr("down")
-	if n.Up {
+	if n.MetadataUnavailable {
+		state = m.tr("link state unknown")
+	} else if n.Up {
 		state = m.tr("up")
 	}
 	limit := chart.Maximum(m.visiblePoints("net:"+n.Name+":rx"), m.visiblePoints("net:"+n.Name+":tx"))
@@ -554,7 +571,15 @@ func (m *Model) networkView(w, h int) string {
 		{labels: []string{p.network.Render(m.tr("Receive %s", speed(n.ReceiveRate)))}, keys: []string{"net:" + n.Name + ":rx"}, limit: limit, style: p.network},
 		{labels: []string{p.cpu.Render(m.tr("Send %s", speed(n.SendRate)))}, keys: []string{"net:" + n.Name + ":tx"}, limit: limit, style: p.cpu, priority: 1},
 	}
-	details := metricLines([]string{m.tr("Received %s · Sent %s · Errors %d · Drops %d", bytes(float64(n.Received)), bytes(float64(n.Sent)), n.Errors, n.Drops), m.tr("Addresses %s", clean(strings.Join(n.Addresses, " · ")))}, w)
+	counters := m.tr("Traffic counters unavailable.")
+	if !n.CountersUnavailable {
+		counters = m.tr("Received %s · Sent %s · Errors %d · Drops %d", bytes(float64(n.Received)), bytes(float64(n.Sent)), n.Errors, n.Drops)
+	}
+	addresses := "—"
+	if len(n.Addresses) > 0 {
+		addresses = clean(strings.Join(n.Addresses, " · "))
+	}
+	details := metricLines([]string{counters, m.tr("Addresses %s", addresses)}, w)
 	lines := []string{m.title(m.tr("Network"), m.tr("%s · %s · interface %d/%d", n.Name, state, i+1, len(m.snapshot.Networks))), m.panelLayout(panels, w, h-1-len(details), 1)}
 	lines = append(lines, details...)
 	return strings.Join(lines, "\n")
@@ -852,8 +877,10 @@ func (m *Model) npuView(i, w, h int) string {
 func (m *Model) processView(w, h int) string {
 	p := m.palette()
 	summary := fmt.Sprint(len(m.rows))
-	if len(m.rows) != m.snapshot.ProcessCount {
-		summary = fmt.Sprintf("%d/%d", len(m.rows), m.snapshot.ProcessCount)
+	if m.snapshot.ProcessesAt.IsZero() {
+		summary = i18n.Count(m.snapshot.ProcessCount, !m.snapshot.ProcessCountUnavailable)
+	} else if len(m.rows) != m.snapshot.ProcessListTotal {
+		summary = fmt.Sprintf("%d/%d", len(m.rows), m.snapshot.ProcessListTotal)
 	}
 	if m.tree {
 		summary += " · " + m.tr("tree (siblings sorted)")
@@ -866,15 +893,19 @@ func (m *Model) processView(w, h int) string {
 		order += " · CPU " + arrow
 	}
 	lines := []string{m.title(m.tr("Processes"), summary+" · "+m.tr("sort: %s", order))}
+	showFilter := m.searching || (m.query != "" && h > 1)
 	if m.searching {
 		lines = append(lines, m.input.View())
-	} else if m.query != "" {
+	} else if showFilter {
 		lines = append(lines, p.accent.Render(m.tr("Filter: %s · Esc clears", clean(m.query))))
 	}
 	if m.snapshot.ProcessesAt.IsZero() {
+		if len(lines) >= h {
+			lines = lines[1:]
+		}
 		return strings.Join(append(lines, m.tr("Collecting processes…")), "\n")
 	}
-	if time.Since(m.snapshot.ProcessesAt) > 5*time.Second && !m.paused {
+	if time.Since(m.snapshot.ProcessesAt) > max(5*time.Second, 2*m.settings.Interval()) && !m.paused {
 		lines[0] += p.danger.Render(m.tr(" · stale %s", m.snapshot.ProcessesAt.Format("15:04:05")))
 	}
 	format := func(pid, name, cpu, rss, threads string) string {
@@ -900,7 +931,7 @@ func (m *Model) processView(w, h int) string {
 	lines = append(lines, format(header("pid", "PID"), header("name", m.tr("NAME")), header("cpu", "CPU %"), header("memory", "RSS"), p.muted.Render(m.tr("THREADS"))))
 	if len(lines) >= h {
 		// Drop headings first so a short viewport still shows the active filter.
-		if m.searching || m.query != "" {
+		if showFilter {
 			lines = lines[1:2]
 		} else {
 			lines = nil
@@ -924,7 +955,7 @@ func (m *Model) processView(w, h int) string {
 				rss = m.heatStyle(float64(r.RSS)/float64(pool)*100, p.memory).Render(rss)
 			}
 		}
-		line := format(fmt.Sprint(r.PID), name, cpu, rss, knownInt(r.Threads, r.ThreadsKnown))
+		line := format(fmt.Sprint(r.PID), name, cpu, rss, i18n.Count(int(r.Threads), r.ThreadsKnown))
 		if i == m.cursor {
 			line = p.accent.Reverse(true).Render(fit(line, w))
 		}
@@ -988,7 +1019,7 @@ func (m *Model) modalView() string {
 		return m.tr("Sending SIGTERM…")
 	case "detail":
 		d := m.detail
-		body := m.title(m.tr("Process details"), fmt.Sprintf("PID %d · PPID %d", d.PID, d.PPID)) + m.tr("\n\nName         %s\nUser         %s\nStatus       %s\nCPU          %s (100%% = one core)\nResident     %s\nVirtual      %s\nThreads      %s\nExecutable   %s\nCommand      %s", clean(d.Name), clean(d.User), clean(d.Status), percent(d.CPU), knownBytes(d.RSS, d.MemoryKnown), knownBytes(d.VMS, d.MemoryKnown), knownInt(d.Threads, d.ThreadsKnown), clean(d.Executable), clean(d.Command))
+		body := m.title(m.tr("Process details"), fmt.Sprintf("PID %d · PPID %d", d.PID, d.PPID)) + m.tr("\n\nName         %s\nUser         %s\nStatus       %s\nCPU          %s (100%% = one core)\nResident     %s\nVirtual      %s\nThreads      %s\nExecutable   %s\nCommand      %s", clean(d.Name), clean(d.User), clean(d.Status), percent(d.CPU), knownBytes(d.RSS, d.MemoryKnown), knownBytes(d.VMS, d.MemoryKnown), i18n.Count(int(d.Threads), d.ThreadsKnown), clean(d.Executable), clean(d.Command))
 		if d.Err != "" {
 			body += "\n" + p.muted.Render(clean(d.Err))
 		}
@@ -1017,6 +1048,9 @@ func (m *Model) pageHint() string {
 	if m.modal != "" {
 		if m.modal == "confirm" {
 			return m.tr("y confirm · Enter / n / Esc cancel")
+		}
+		if m.modal == "terminating" {
+			return m.tr("Sending SIGTERM…")
 		}
 		return m.tr("↑/↓ scroll · Enter / Esc close")
 	}

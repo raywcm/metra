@@ -99,9 +99,3 @@ func knownBytes(v uint64, known bool) string {
 	}
 	return bytes(float64(v))
 }
-func knownInt(v int32, known bool) string {
-	if !known {
-		return "—"
-	}
-	return fmt.Sprint(v)
-}

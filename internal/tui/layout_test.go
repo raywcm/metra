@@ -322,3 +322,152 @@ func TestOneLineProcessActionsRemainVisible(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestSingleRowProcessFilterShowsResultAfterEnter(t *testing.T) {
+	for _, height := range []int{1, 4} {
+		m, _ := model(t)
+		m.settings.Language = "en"
+		m.tab = m.tabIndex("processes")
+		m.Update(tea.WindowSizeMsg{Width: 50, Height: height})
+		for _, tc := range []struct{ query, want string }{
+			{"worker", "12.0"}, {"unknown-name", "No matching processes."},
+		} {
+			m.Update(key("/"))
+			m.Update(tea.PasteMsg{Content: tc.query})
+			m.Update(key("enter"))
+			if view := ansi.Strip(m.View().Content); !strings.Contains(view, tc.want) {
+				t.Errorf("height %d, committed filter %q: %s", height, tc.query, view)
+			}
+			m.Update(key("esc"))
+		}
+		m.snapshot.ProcessesAt = time.Time{}
+		m.ready = false
+		m.Update(key("/"))
+		if view := ansi.Strip(m.View().Content); !strings.Contains(view, "Search ›") {
+			t.Errorf("search hidden while waiting for initial process list: %s", view)
+		}
+	}
+}
+
+func TestProcessStalenessFollowsSamplingInterval(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	m.settings.IntervalMS = 10000
+	m.snapshot.ProcessesAt = time.Now().Add(-8 * time.Second)
+	if strings.Contains(m.processView(100, 20), "stale") {
+		t.Fatal("process sample marked stale before next scheduled refresh")
+	}
+	m.snapshot.ProcessesAt = time.Now().Add(-30 * time.Second)
+	if !strings.Contains(m.processView(100, 20), "stale") {
+		t.Fatal("overdue sample lacks stale indicator")
+	}
+}
+
+func TestCompactNetworkPageFollowsSelection(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	s := fixture()
+	s.Networks = []collector.Network{
+		{Name: "eth0", ReceiveRate: 10, SendRate: 20},
+		{Name: "wifi0", ReceiveRate: 30, SendRate: 40},
+	}
+	m.Update(sampleMsg{snapshot: s})
+	m.tab = m.tabIndex("network")
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 2})
+	m.Update(key("down"))
+	view := ansi.Strip(m.View().Content)
+	for _, want := range []string{"wifi0", "↓ 30 B/s", "↑ 40 B/s"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missing %q in %q", want, view)
+		}
+	}
+	s.Networks = nil
+	m.Update(sampleMsg{snapshot: s})
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "No active network interfaces.") {
+		t.Error(view)
+	}
+}
+
+func TestHardwareScrollFollowsVisibleContent(t *testing.T) {
+	m, _ := model(t)
+	m.Update(tea.WindowSizeMsg{Width: 48, Height: 10})
+	m.tab = m.tabIndex("cpu")
+	s := fixture()
+	s.CPU.Cores = make([]float64, 192)
+	m.Update(sampleMsg{snapshot: s})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	oldBottom := m.scroll
+	s.CPU.Cores = s.CPU.Cores[:96]
+	m.Update(sampleMsg{snapshot: s})
+	bottom := m.hardwareScrollMax()
+	if bottom < 1 || bottom >= oldBottom {
+		t.Fatal("fixture needs two scrollable tables", oldBottom, bottom)
+	}
+	m.Update(key("up"))
+	if m.scroll != bottom-1 {
+		t.Fatalf("first Up after the table shrank landed at %d, want %d", m.scroll, bottom-1)
+	}
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 2})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if m.scroll != 0 {
+		t.Fatal("compact page accumulated an invisible scroll offset", m.scroll)
+	}
+}
+
+func TestNetworkSwitchOnRefreshStartsAtTop(t *testing.T) {
+	m, _ := model(t)
+	m.Update(tea.WindowSizeMsg{Width: 30, Height: 6})
+	s := fixture()
+	s.Networks = []collector.Network{{Name: "eth0"}, {Name: "wg0", Addresses: []string{"192.0.2.1/24", "2001:db8::1/64"}}}
+	m.Update(sampleMsg{snapshot: s})
+	m.tab = m.tabIndex("network")
+	m.Update(key("down"))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m.scroll == 0 {
+		t.Fatal("test requires a scrolled network page")
+	}
+	s.Networks = s.Networks[:1]
+	m.Update(sampleMsg{snapshot: s})
+	if m.scroll != 0 || m.networkPinned || !strings.Contains(ansi.Strip(m.View().Content), "eth0") {
+		t.Fatal("replacement interface inherited the departed interface's scroll", m.scroll)
+	}
+}
+
+func TestInterfaceNamedTotalHasIndependentHistory(t *testing.T) {
+	m, _ := model(t)
+	s := fixture()
+	s.Networks = []collector.Network{{Name: "total", ReceiveRate: 12, SendRate: 32}, {Name: "eth0", ReceiveRate: 20, SendRate: 40}}
+	m.Update(sampleMsg{snapshot: s})
+	for key, want := range map[string]float64{"net:total:rx": 12, "net:total:tx": 32} {
+		points := m.history.Points(key)
+		if len(points) != 1 || points[0].Value != want {
+			t.Errorf("%s should have one per-interface sample, got %v", key, points)
+		}
+	}
+	for key, want := range map[string]float64{"net:rx": 32, "net:tx": 72} {
+		points := m.history.Points(key)
+		if len(points) != 2 || points[1].Value != want {
+			t.Errorf("%s should track the sum across both interfaces, got %v", key, points)
+		}
+	}
+}
+
+func TestUnmappedVolumeIsAccessibleAlongsideDisks(t *testing.T) {
+	m, _ := model(t)
+	s := fixture()
+	s.Volumes = []collector.Mount{{Path: "/archive", FSType: "nfs", Total: 4 << 30, Used: 1 << 30}}
+	m.Update(sampleMsg{snapshot: s})
+	m.tab = m.tabIndex("volumes")
+	if m.current().ID != "volumes" {
+		t.Fatal("unmapped network volume has no page when a physical disk is present")
+	}
+	if text := m.diskView(0, 100, 25); strings.Contains(text, "/archive") {
+		t.Fatal("unrelated network storage appeared on Disk0")
+	}
+	for _, view := range []string{m.page(100, 25), m.compactValue()} {
+		if !strings.Contains(view, "/archive") || !strings.Contains(view, "4.0 GiB") {
+			t.Fatal("volume capacity missing", view)
+		}
+	}
+}

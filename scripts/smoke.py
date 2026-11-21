@@ -101,6 +101,10 @@ try:
     send(b'/')
     filtered = send(b'\x1b[200~metra\x1b[201~\r')
     assert label('Filter: metra', '过滤：metra') in filtered, 'pasted process filter was lost on Enter'
+    send(b'\x1b[C')
+    send(b'\x1b', .2)
+    returned = send(b'\x1b[D')
+    assert label('Filter: metra', '过滤：metra') in returned, 'Esc on CPU cleared the process filter'
     send(b'\x1b', .2)
     send(b'ts')
     cpu = send(b'\x1b[C')
@@ -209,6 +213,11 @@ try:
     send(b'\t')    # back to overview
     paused=send(b' ')
     assert label('PAUSED','已暂停') in paused, 'space did not pause sampling'
+    if args.responsive:
+        resize(40, 1)
+        assert label('PAUSED','已暂停') in drain(.7), 'one-line terminal hid the paused status'
+        resize(120, 36)
+        drain(.7)
     resumed=send(b' ')
     assert resumed and label('PAUSED','已暂停') not in resumed, 'space did not clear paused status'
     send(b'?')

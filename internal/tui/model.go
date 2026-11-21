@@ -33,9 +33,9 @@ type tickMsg struct{ generation uint64 }
 type themeTickMsg struct{}
 type themeQueryMsg struct{}
 type detailMsg struct {
-	detail collector.Detail
-	err    error
-	target collector.Process
+	detail  collector.Detail
+	err     error
+	request context.Context
 }
 type actionMsg struct{ err error }
 type saveMsg struct {
@@ -56,6 +56,7 @@ type Model struct {
 	dark                                                     bool
 	terminalBackground                                       color.Color
 	historyGap                                               bool
+	nextSampleBy                                             time.Time
 	generation                                               uint64
 	ctx                                                      context.Context
 	source                                                   collector.Source
@@ -75,6 +76,7 @@ type Model struct {
 	searching                                                bool
 	query                                                    string
 	modal                                                    string
+	cancelDetail                                             context.CancelFunc
 	target                                                   collector.Process
 	detail                                                   collector.Detail
 	status                                                   string
@@ -110,6 +112,12 @@ func (m *Model) sample() tea.Cmd {
 		return sampleMsg{snapshot: s, elapsed: time.Since(start), withProcesses: processes}
 	}
 }
+
+// Allow normal scheduling jitter before treating a missed sample as a gap.
+func sampleGap(interval time.Duration) time.Duration {
+	return max(2*time.Second, 3*interval)
+}
+
 func (m *Model) tick(after time.Duration) tea.Cmd {
 	generation := m.generation
 	return tea.Tick(max(25*time.Millisecond, after), func(time.Time) tea.Msg { return tickMsg{generation} })
@@ -124,7 +132,7 @@ func (m *Model) rebuildTabs() {
 	for i, d := range m.snapshot.Disks {
 		tabs = append(tabs, Tab{"disk:" + d.ID, fmt.Sprintf("Disk%d", i), "disk", i})
 	}
-	if len(m.snapshot.Disks) == 0 && len(m.snapshot.Volumes) > 0 {
+	if len(m.snapshot.Volumes) > 0 {
 		tabs = append(tabs, Tab{"volumes", "Volumes", "volumes", 0})
 	}
 	tabs = append(tabs, Tab{"network", "Network", "network", 0})
@@ -137,6 +145,9 @@ func (m *Model) rebuildTabs() {
 	tabs = append(tabs, Tab{"settings", "Settings", "settings", 0})
 	m.tabs = tabs
 	m.tab = m.tabIndex(id)
+	if m.current().ID != id {
+		m.scroll = 0
+	}
 }
 
 func (m *Model) tabIndex(id string) int {
@@ -148,7 +159,7 @@ func (m *Model) tabIndex(id string) int {
 	return 0
 }
 func (m *Model) remember() {
-	s := m.snapshot
+	s := &m.snapshot
 	keys := map[string]bool{}
 	add := func(k string, v float64) {
 		if m.historyGap {
@@ -180,8 +191,8 @@ func (m *Model) remember() {
 		add("net:"+n.Name+":rx", n.ReceiveRate)
 		add("net:"+n.Name+":tx", n.SendRate)
 	}
-	add("net:total:rx", networkRate(s.Networks, true))
-	add("net:total:tx", networkRate(s.Networks, false))
+	add("net:rx", networkRate(s, true))
+	add("net:tx", networkRate(s, false))
 	for _, g := range s.GPUs {
 		add("gpu:"+g.ID, g.Utilization)
 		add("gpu:"+g.ID+":pcie-rx-bytes", g.PCIeReceive)
@@ -206,7 +217,7 @@ func (m *Model) refreshRows() {
 	row := m.cursor - m.offset
 	if m.cursor >= 0 && m.cursor < len(m.rows) && pinned {
 		selected = m.rows[m.cursor].Process
-		selectedValid = true
+		selectedValid = selected.Created > 0
 	}
 	m.rows = processRows(m.snapshot.Processes, m.query, m.sortBy, m.reverse, m.tree)
 	m.cursor, m.offset = 0, 0
@@ -261,6 +272,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = max(1, msg.Height)
 		m.input.SetWidth(max(5, m.width-18))
 		m.clampCursor()
+		m.clampPageScroll()
 	case sampleMsg:
 		m.inFlight = false
 		if m.discardPending || m.paused {
@@ -271,29 +283,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inFlight = true
 			return m, m.sample()
 		}
-		selectedNetwork := ""
-		if m.networkPinned && m.network >= 0 && m.network < len(m.snapshot.Networks) {
-			selectedNetwork = m.snapshot.Networks[m.network].Name
+		previousNetwork := ""
+		if m.network >= 0 && m.network < len(m.snapshot.Networks) {
+			previousNetwork = m.snapshot.Networks[m.network].Name
 		}
-		refreshProcesses := m.current().Kind == "processes" || !msg.snapshot.ProcessesAt.Equal(m.snapshot.ProcessesAt)
+		refreshProcesses := !msg.snapshot.ProcessesAt.Equal(m.snapshot.ProcessesAt)
+		if !m.nextSampleBy.IsZero() && msg.snapshot.At.After(m.nextSampleBy) {
+			m.historyGap = true
+		}
 		m.snapshot = msg.snapshot
+		m.nextSampleBy = m.snapshot.At.Add(sampleGap(m.settings.Interval()))
 		m.network = 0
-		if selectedNetwork != "" {
-			found := false
+		if m.networkPinned {
+			m.networkPinned = false
 			for i, n := range m.snapshot.Networks {
-				if n.Name == selectedNetwork {
+				if n.Name == previousNetwork {
 					m.network = i
-					found = true
+					m.networkPinned = true
 					break
 				}
 			}
-			if !found {
-				m.networkPinned = false
-			}
+		}
+		if m.current().Kind == "network" && (len(m.snapshot.Networks) == 0 || m.snapshot.Networks[m.network].Name != previousNetwork) {
+			m.scroll = 0
 		}
 		m.ready = true
 		m.rebuildTabs()
 		m.remember()
+		m.clampPageScroll()
 		if refreshProcesses {
 			m.refreshRows()
 		}
@@ -309,7 +326,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inFlight = true
 		return m, m.sample()
 	case detailMsg:
-		if m.modal == "loading" && m.target.PID == msg.target.PID && m.target.Created == msg.target.Created {
+		if m.modal == "loading" && msg.request.Err() == nil {
+			m.cancelDetail()
+			m.cancelDetail = nil
 			if msg.err != nil {
 				m.modal = ""
 				m.status = m.tr("Details: %s", msg.err.Error())
@@ -356,7 +375,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.modal == "terminating" {
 				return m, nil
 			}
-			if key == "esc" || key == "n" || (key == "enter" && m.modal == "confirm") {
+			if key == "esc" || key == "n" || key == "enter" {
+				if m.cancelDetail != nil {
+					m.cancelDetail()
+					m.cancelDetail = nil
+				}
 				m.modal = ""
 				return m, nil
 			}
@@ -368,9 +391,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					defer cancel()
 					return actionMsg{m.source.Terminate(ctx, target)}
 				}
-			}
-			if m.modal == "detail" && key == "enter" {
-				m.modal = ""
 			}
 			return m, nil
 		}
@@ -414,12 +434,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cores = !m.cores
 				m.scroll = 0
 			}
-		case "esc":
-			m.query = ""
-			m.processPinned = false
-			m.cursor, m.offset = 0, 0
-			m.input.SetValue("")
-			m.refreshRows()
 		default:
 			return m, m.pageKey(key)
 		}
@@ -471,6 +485,12 @@ func (m *Model) pageKey(key string) tea.Cmd {
 	switch m.current().Kind {
 	case "processes":
 		switch key {
+		case "esc":
+			m.query = ""
+			m.processPinned = false
+			m.cursor, m.offset = 0, 0
+			m.input.SetValue("")
+			m.refreshRows()
 		case "up", "k":
 			m.processPinned = true
 			m.cursor--
@@ -516,15 +536,16 @@ func (m *Model) pageKey(key string) tea.Cmd {
 			m.refreshRows()
 		case "enter", "d":
 			if len(m.rows) > 0 {
-				m.target = m.rows[m.cursor].Process
+				target := m.rows[m.cursor].Process
+				request, cancelRequest := context.WithCancel(m.ctx)
+				m.cancelDetail = cancelRequest
 				m.modal = "loading"
 				m.overlayScroll = 0
-				target := m.target
 				return func() tea.Msg {
-					ctx, cancel := context.WithTimeout(m.ctx, 2*time.Second)
+					ctx, cancel := context.WithTimeout(request, 2*time.Second)
 					defer cancel()
 					d, e := m.source.Detail(ctx, target)
-					return detailMsg{d, e, target}
+					return detailMsg{d, e, request}
 				}
 			}
 		case "delete", "backspace", "x":
@@ -556,6 +577,12 @@ func (m *Model) pageKey(key string) tea.Cmd {
 		m.scrollPage(key)
 	}
 	return nil
+}
+
+func (m *Model) clampPageScroll() {
+	if m.scroll > 0 {
+		m.scroll = min(m.scroll, m.hardwareScrollMax())
+	}
 }
 
 func (m *Model) scrollPage(key string) {
@@ -622,10 +649,13 @@ func (m *Model) changeSetting(direction int) {
 }
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-func networkRate(networks []collector.Network, receive bool) float64 {
+func networkRate(s *collector.Snapshot, receive bool) float64 {
+	if s.NetworkInventoryUnavailable {
+		return math.NaN()
+	}
 	sum := 0.0
 	valid := false
-	for _, n := range networks {
+	for _, n := range s.Networks {
 		if n.ExcludeFromTotals {
 			continue
 		}
@@ -633,10 +663,11 @@ func networkRate(networks []collector.Network, receive bool) float64 {
 		if receive {
 			v = n.ReceiveRate
 		}
-		if finite(v) {
-			sum += v
-			valid = true
+		if n.CountersUnavailable || !finite(v) {
+			return math.NaN()
 		}
+		sum += v
+		valid = true
 	}
 	if !valid {
 		return math.NaN()
@@ -694,6 +725,25 @@ func (m *Model) selectTab(tab int) tea.Cmd {
 	return nil
 }
 func (m *Model) settingsKey(key string) tea.Cmd {
+	previous := m.settings.Interval()
+	cmd := m.handleSettingsKey(key)
+	interval := m.settings.Interval()
+	if previous == interval || m.inFlight || m.paused {
+		return cmd
+	}
+	// Replace the outstanding timer on both preview and cancellation. Time
+	// already spent waiting under the old cadence still belongs to it.
+	now := time.Now()
+	if !m.nextSampleBy.IsZero() && now.After(m.nextSampleBy) {
+		m.historyGap = true
+	}
+	wait := max(0, m.snapshot.At.Add(interval).Sub(now))
+	m.nextSampleBy = now.Add(wait + sampleGap(interval) - interval)
+	m.generation++
+	return tea.Batch(cmd, m.tick(wait))
+}
+
+func (m *Model) handleSettingsKey(key string) tea.Cmd {
 	if m.saving {
 		return nil
 	}
