@@ -38,9 +38,20 @@ shutil.copyfile(pathlib.Path(os.environ['METRA_FIXTURE'])/url.rsplit('/',1)[-1],
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'], METRA_FIXTURE=str(fixture), METRA_PREFIX=str(prefix))
     subprocess.run(['sh', str(installer)], env=env, check=True, capture_output=True)
     assert subprocess.check_output([str(prefix/'bin/metra')]).strip() == b'metra installer-test'
+    destination = prefix / 'bin' / 'metra'
+    destination.write_bytes(b'previous version')
+    subprocess.run(['sh', str(installer)], env=env, check=True, capture_output=True)
+    assert destination.read_bytes() == payload, 'upgrade did not replace the existing binary'
     checks.write_text(f'{"0"*64}  {name}\n')
     result = subprocess.run(['sh', str(installer)], env=env, capture_output=True)
     assert result.returncode != 0 and b'verification failed' in result.stderr
-    assert (prefix/'bin/metra').read_bytes() == payload, 'failed upgrade replaced installed binary'
+    assert destination.read_bytes() == payload, 'failed upgrade replaced installed binary'
     assert not list((prefix/'bin').glob('.metra-install.*'))
-print('Installer passed: verified install, checksum rejection, existing binary preserved')
+    checks.write_text(f'{digest}  {name}\n')
+    destination.unlink()
+    destination.mkdir()
+    result = subprocess.run(['sh', str(installer)], env=env, capture_output=True)
+    assert result.returncode != 0, 'installer reported success with a directory at the binary path'
+    assert not list(destination.iterdir()), 'installer left a staged binary inside the existing directory'
+    assert not list(destination.parent.glob('.metra-install.*'))
+print('Installer passed: verified install, checksum rejection, existing binary preserved, directory conflict')

@@ -18,7 +18,7 @@ smoke: build
 	python3 scripts/smoke.py bin/metra
 install: build
 	install -d "$(DESTDIR)$(PREFIX)/bin"
-	install -m 755 bin/metra "$(DESTDIR)$(PREFIX)/bin/metra"
+	install -m 755 bin/metra "$(DESTDIR)$(PREFIX)/bin/"
 uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/bin/metra"
 snapshot:

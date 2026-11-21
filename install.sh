@@ -22,8 +22,8 @@ if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$work/$archive
 tar -xzf "$work/$archive" -C "$work" metra
 [ -f "$work/metra" ] && [ ! -L "$work/metra" ] || { echo 'Invalid binary in archive' >&2; exit 1; }
 mkdir -p "$prefix/bin"
-staged=$(mktemp "$prefix/bin/.metra-install.XXXXXX")
-trap 'rm -f "$staged"; rm -rf "$work"' EXIT HUP INT TERM
-install -m 755 "$work/metra" "$staged"
-mv -f "$staged" "$prefix/bin/metra"
+staged=$(mktemp -d "$prefix/bin/.metra-install.XXXXXX")
+trap 'rm -rf "$staged" "$work"' EXIT HUP INT TERM
+install -m 755 "$work/metra" "$staged/metra"
+mv -f "$staged/metra" "$prefix/bin/"
 printf 'Installed metra to %s/bin/metra\nAdd %s/bin to your PATH if needed.\n' "$prefix" "$prefix"

@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestConfigDirectoryMustBeAbsolute(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := t.TempDir()
+	for _, tc := range []struct{ xdg, want string }{
+		{"", base}, {"local-settings", base}, {".", base}, {override, override},
+	} {
+		t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+		got, err := Path()
+		if err != nil || got != filepath.Join(tc.want, "metra", "settings.json") {
+			t.Errorf("XDG_CONFIG_HOME=%q resolved to %q, %v", tc.xdg, got, err)
+		}
+	}
+}
+
 func TestRoundTripAndCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metra", "settings.json")
 	s, e := Load(path)

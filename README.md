@@ -91,7 +91,7 @@ metra --snapshot
 metra --help
 ```
 
-Settings are saved to `$XDG_CONFIG_HOME/metra/settings.json`, or the platform default: `~/.config/metra/settings.json` on Linux and `~/Library/Application Support/metra/settings.json` on macOS. Use `--config PATH` for a separate configuration.
+When `XDG_CONFIG_HOME` is an absolute path, settings are saved to `$XDG_CONFIG_HOME/metra/settings.json`. Otherwise Metra uses the platform default, `~/.config/metra/settings.json` on Linux and `~/Library/Application Support/metra/settings.json` on macOS. Use `--config PATH` for a separate configuration.
 
 ## Build
 
