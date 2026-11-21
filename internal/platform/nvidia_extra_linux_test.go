@@ -6,6 +6,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,26 @@ func TestNVMLMediaCapabilitiesHideAbsentButKeepIdle(t *testing.T) {
 	a.collectMedia(&g, d)
 	if len(g.Engines) != 0 || len(g.AbsentEngines) != 4 || queries != 3 {
 		t.Fatal("assigned device attributes should override full-chip profiles", g)
+	}
+}
+
+func TestNVIDIAAbsentEngineCannotSupplyOverallUtilization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nvidia-smi")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'GPU-1, Card, N/A, 128, 1024, 42, 85, 0'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	backend := nvidia{
+		path:  path,
+		query: append(append([]string(nil), nvidiaBaseQuery...), "utilization.encoder"),
+		extra: &nvmlExtra{
+			devices:    make(map[string]*nvmlDevice),
+			handle:     func(string, *uintptr) int32 { return 0 },
+			attributes: func(uintptr, *nvmlAttributes) int32 { return 0 },
+		},
+	}
+	devices, err := backend.Sample(context.Background())
+	if err != nil || len(devices) != 1 || len(devices[0].Engines) != 0 || !math.IsNaN(devices[0].Utilization) {
+		t.Fatalf("an absent encoder produced a live overall reading: %v, %v", devices, err)
 	}
 }
 

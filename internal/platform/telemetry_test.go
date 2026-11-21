@@ -2,11 +2,13 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const ascendTable = `+---------------------------+---------------+----------------------------------------------------+
@@ -76,6 +78,43 @@ func TestAscendChildLibrariesAndSampling(t *testing.T) {
 	}
 }
 
+func TestAscendPartialUsagesKeepSummaryCore(t *testing.T) {
+	for _, tc := range []struct {
+		detail string
+		core   float64
+		peak   float64
+	}{{"", 78, 78}, {"N/A", 78, 78}, {"112", 78, 78}, {"0", 0, 7}} {
+		summary := strings.Replace(ascendTable, "| 0           0    / 0", "| 78          0    / 0", 1)
+		devices, err := parseAscendSummary(summary)
+		if err != nil || len(devices) != 1 || devices[0].Utilization != 78 {
+			t.Fatal("invalid test summary", devices, err)
+		}
+		usages := "Aicpu Usage Rate(%) : 7\n"
+		if tc.detail != "" {
+			usages += "Aicore Usage Rate(%) : " + tc.detail
+		}
+		applyAscendUsages(&devices[0], usages)
+		g := devices[0]
+		if len(g.Engines) != 2 || g.Engines[0].ID != "aicore" || g.Engines[0].Utilization != tc.core || g.Utilization != tc.peak {
+			t.Errorf("detail %q lost the current core reading: %+v", tc.detail, g)
+		}
+	}
+}
+
+func TestSlowAscendSummaryLeavesTimeForOtherMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "npu-smi")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec sleep 10\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	parent, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	b := ascendNPU{path: path}
+	_, err := b.Sample(parent)
+	if !errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil {
+		t.Fatalf("summary timeout = %v, overall sampling deadline = %v", err, parent.Err())
+	}
+}
+
 func TestNVIDIAExtendedEnginesAndClocks(t *testing.T) {
 	query := append(append([]string(nil), nvidiaBaseQuery...), nvidiaOptionalQuery...)
 	devices, err := parseNVIDIAFields("GPU-1, NVIDIA RTX, 25, 1024, 8192, 60, 150, 50, 7, 8, 9, 10, 1440, 1410, 9000, 1000\n", query)
@@ -122,6 +161,74 @@ func TestNVIDIADiscoversOptionalFieldsAndFallsBack(t *testing.T) {
 		if fail && len(devices[0].Engines) != 1 {
 			t.Fatal("invented fallback engines")
 		}
+	}
+}
+
+func TestNVIDIARecordsSurvivePartialDriverOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nvidia-smi")
+	script := `#!/bin/sh
+case "$1" in
+--help-query-gpu) echo '"clocks.current.sm"' ;;
+*clocks.current.sm*)
+    echo 'GPU-A, "Model, A", 35, 128, 1024, 42, 90, 1400'
+    echo 'unreadable device'
+    echo 'GPU-B, Model B, 45, 128, 1024, 42, 90, 1250' ;;
+*)
+    echo 'GPU-A, Model A, 36, 128, 1024, 42, 90'
+    echo 'GPU-C, Model C, 55, 128, 1024, 42, 90'
+    printf 'GPU-D, Incomplete, 70, 128, 1024, 42, 1'
+    exit 15 ;;
+esac
+`
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	backend := nvidia{path: path}
+	devices, err := backend.Sample(context.Background())
+	if err == nil || len(devices) != 3 {
+		t.Fatalf("partial scan returned %v, %v", devices, err)
+	}
+	byID := map[string]GPU{}
+	for _, g := range devices {
+		byID[g.ID] = g
+	}
+	if byID["GPU-A"].Name != "Model, A" || byID["GPU-A"].SMMHz != 1400 || byID["GPU-B"].SMMHz != 1250 || byID["GPU-C"].Utilization != 55 {
+		t.Fatalf("lost a healthy row or its extended counters: %+v", devices)
+	}
+	devices, err = backend.Sample(context.Background())
+	if err == nil || len(devices) != 2 || devices[0].ID != "GPU-A" || devices[1].ID != "GPU-C" {
+		t.Fatalf("basic query lost complete records or accepted an interrupted record: %v, %v", devices, err)
+	}
+}
+
+func TestNVIDIABoundsAndMissingReadings(t *testing.T) {
+	query := append(append([]string(nil), nvidiaBaseQuery...), "clocks.current.sm")
+	devices, err := parseNVIDIAFields("GPU-A, Model, 103, inf, 1e308, 42, 0, -1", query)
+	if err != nil || len(devices) != 1 {
+		t.Fatal(devices, err)
+	}
+	g := devices[0]
+	if !math.IsNaN(g.Utilization) || !math.IsNaN(g.SMMHz) || !math.IsNaN(g.MemoryUsed) || !math.IsNaN(g.MemoryTotal) || g.Power != 0 || g.Temperature != 42 {
+		t.Fatalf("invalid or zero readings mishandled: %+v", g)
+	}
+	for _, bad := range []float64{math.Inf(1), math.Inf(-1), -1, 101} {
+		if !math.IsNaN(PeakUtilization(bad, nil)) {
+			t.Errorf("invalid aggregate utilization accepted: %v", bad)
+		}
+	}
+}
+
+func TestNVIDIARowsRequireDistinctDeviceIdentities(t *testing.T) {
+	records := []string{
+		" , unknown, 4, 10, 20, 30, 40",
+		"[N/A], unknown, 8, 10, 20, 30, 40",
+		"GPU-1, one, 15, 10, 20, 30, 40",
+		"GPU-1, duplicate, 70, 10, 20, 30, 40",
+		"GPU-2, two, 38, 10, 20, 30, 40",
+	}
+	devices, err := parseNVIDIA(strings.Join(records, "\n"))
+	if err == nil || len(devices) != 2 || devices[0].Utilization != 15 || devices[1].ID != "GPU-2" {
+		t.Fatal(devices, err)
 	}
 }
 

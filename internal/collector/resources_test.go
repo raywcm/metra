@@ -1,10 +1,11 @@
 package collector
 
 import (
-	"github.com/raywcm/metra/internal/platform"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/raywcm/metra/internal/platform"
 )
 
 func TestAllocationIsNotWholeHost(t *testing.T) {
@@ -84,5 +85,50 @@ func TestNoHostAverageWhenAllocatedCoresHaveNoSample(t *testing.T) {
 	applyAllocation(&s, platform.Limits{AllowedKnown: true, AllowedCPUs: []int{1}, CPUQuota: math.NaN()})
 	if !math.IsNaN(s.CPU.Percent) {
 		t.Fatal("another CPU's usage leaked into allocation", s.CPU.Percent)
+	}
+}
+
+func TestQuotaWiderThanAffinityStillUsesGroupCPUTime(t *testing.T) {
+	s := Snapshot{CPU: CPU{Cores: []float64{95, 85}, IDs: []int{0, 1}}}
+	limits := platform.Limits{
+		CPUQuota: 4, CPUCapacity: 2, CPUGroupCPUs: 2, AllowedKnown: true, AllowedCPUs: []int{0, 1},
+		CPUUsageKnown: true, CPUUsageID: "job", CPUUsageNS: 250000000,
+	}
+	applyAllocation(&s, limits)
+	if !s.CPU.Scoped || s.CPU.Capacity != 2 {
+		t.Fatalf("group was reported using other processes' core averages: %+v", s.CPU)
+	}
+	before := limits
+	before.CPUUsageNS = 0
+	if got := allocationCPUPercent(before, limits, time.Second); got != 12.5 {
+		t.Fatal(got)
+	}
+	limits.CPUGroupCPUs = 8
+	applyAllocation(&s, limits)
+	if s.CPU.Scoped {
+		t.Fatal("group can run outside the process-specific affinity mask")
+	}
+}
+
+func TestRestrictedCPUSetWithoutTimeQuota(t *testing.T) {
+	limits := platform.Limits{CPUQuota: math.NaN(), CPUCapacity: 1, CPUGroupCPUs: 1, AllowedKnown: true, AllowedCPUs: []int{0}, CPUUsageKnown: true}
+	host := func() Snapshot { return Snapshot{CPU: CPU{Cores: []float64{100, 0}}} }
+	s := host()
+	applyAllocation(&s, limits)
+	if !s.CPU.Scoped {
+		t.Fatal("a cpuset sharing a busy core used host-wide utilization")
+	}
+	limits.CPUUsageKnown = false
+	s = host()
+	applyAllocation(&s, limits)
+	if !math.IsNaN(s.CPU.Percent) {
+		t.Fatal("missing group counter was replaced with the physical core's load", s.CPU.Percent)
+	}
+	limits.CPUUsageKnown = true
+	limits.CPUGroupCPUs = 2
+	s = host()
+	applyAllocation(&s, limits)
+	if s.CPU.Scoped || s.CPU.Percent != 100 {
+		t.Fatal("a process-only affinity mask was mistaken for a group cpuset", s.CPU)
 	}
 }

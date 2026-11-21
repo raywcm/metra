@@ -3,9 +3,11 @@ package collector
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,19 +15,12 @@ import (
 
 	"github.com/raywcm/metra/internal/platform"
 	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	netstat "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 )
-
-type processCounter struct {
-	total   float64
-	created int64
-	at      time.Time
-}
 
 // Collector is owned by one sampling command at a time. It uses counter deltas,
 // never blocking cpu.Percent intervals or a goroutine per process.
@@ -37,27 +32,35 @@ type Collector struct {
 	limitsAt          time.Time
 	previousLimits    platform.Limits
 	npu               platform.NPUBackend
-	diskAt, netAt     time.Time
 	lastGPUs          []platform.GPU
 	lastNPUs          []platform.NPU
 	gpu               platform.GPUBackend
 	cpu               []cpu.TimesStat
-	disks             map[string]disk.IOCountersStat
-	nets              map[string]netstat.IOCountersStat
+	disks             map[string]diskBaseline
+	nets              map[string]networkCounter
 	proc              map[int32]processCounter
+	sweep             *processSweep
 	metadata          Snapshot
 	initialized       bool
-	mounts            map[string][]Mount
-	mountsAt          time.Time
+	volumes           volumeCache
+	volumeCtx         context.Context
+	stopVolumes       context.CancelFunc
 	processes         []Process
 	processesAt       time.Time
+	processListTotal  int
 }
 
 func New() *Collector {
-	return &Collector{gpu: platform.NewGPU(), npu: platform.NewNPU(), proc: make(map[int32]processCounter)}
+	return newCollector(platform.NewGPU(), platform.NewNPU())
+}
+
+func newCollector(gpu platform.GPUBackend, npu platform.NPUBackend) *Collector {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Collector{gpu: gpu, npu: npu, volumeCtx: ctx, stopVolumes: cancel}
 }
 
 func (c *Collector) Close() {
+	c.stopVolumes()
 	if closer, ok := c.gpu.(interface{ Close() }); ok {
 		closer.Close()
 	}
@@ -169,101 +172,30 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 		s.Memory.SwapTotal = swap.Total
 		s.Memory.SwapUsed = swap.Used
 	}
-	elapsed := now.Sub(c.diskAt).Seconds()
-	counters, err := disk.IOCountersWithContext(ctx)
-	warn("disk I/O", err)
-	var names []string
-	if err == nil {
-		for name := range counters {
-			if platform.PhysicalDisk(name) {
-				names = append(names, name)
-			}
-		}
-		sort.Strings(names)
+	inventory, diskErr := platform.ReadDisks(ctx, slices.Collect(maps.Keys(c.disks)))
+	warn("disk I/O", diskErr)
+	s.DiskInventoryUnavailable = inventory.Incomplete
+	s.Disks = c.sampleDisks(time.Now(), inventory)
+	diskIDs := make(map[string]string, len(s.Disks))
+	for _, d := range s.Disks {
+		diskIDs[d.Name] = d.ID
 	}
-	if c.mounts == nil || now.Sub(c.mountsAt) >= 15*time.Second {
-		if mountErr := c.readMounts(ctx, names); mountErr != nil {
-			warn("mounts", mountErr)
-		} else {
-			c.mountsAt = now
-		}
+	mounts, mountErr := c.volumes.sample(c.volumeCtx, diskIDs, readMounts, mountUsage)
+	warn("mounts", mountErr)
+	for i, d := range s.Disks {
+		s.Disks[i].Mounts = mounts[d.Name]
+		delete(mounts, d.Name)
 	}
-	if err == nil {
-		for _, name := range names {
-			v := counters[name]
-			d := Disk{CombinedBusy: missing(), ID: name, Name: name, ReadRate: missing(), WriteRate: missing(), Busy: missing(), ReadBusy: missing(), WriteBusy: missing(), ReadBytes: v.ReadBytes, WriteBytes: v.WriteBytes, ReadOps: v.ReadCount, WriteOps: v.WriteCount, Mounts: c.mounts[name]}
-			if old, ok := c.disks[name]; ok && elapsed > 0 {
-				d.ReadRate = rate(v.ReadBytes, old.ReadBytes, elapsed)
-				d.WriteRate = rate(v.WriteBytes, old.WriteBytes, elapsed)
-				// Read/write service time can overlap (queued I/O); these are
-				// elapsed-time ratios, not percentages of a guessed peak bandwidth.
-				if runtime.GOOS == "linux" || v.ReadTime+v.WriteTime > 0 || old.ReadTime+old.WriteTime > 0 {
-					d.ReadBusy = math.Min(100, rate(v.ReadTime, old.ReadTime, elapsed)/10)
-					d.WriteBusy = math.Min(100, rate(v.WriteTime, old.WriteTime, elapsed)/10)
-				}
-				if runtime.GOOS == "linux" {
-					d.Busy = math.Min(100, rate(v.IoTime, old.IoTime, elapsed)/10)
-				}
-			}
-			d.CombinedBusy = d.Busy
-			if math.IsNaN(d.CombinedBusy) && !math.IsNaN(d.ReadBusy) && !math.IsNaN(d.WriteBusy) {
-				d.CombinedBusy = math.Min(100, d.ReadBusy+d.WriteBusy)
-			}
-			s.Disks = append(s.Disks, d)
-		}
-		c.disks = counters
-		c.diskAt = now
-	}
-	interfaces, e := netstat.InterfacesWithContext(ctx)
-	warn("network interfaces", e)
-	ifaces := make(map[string]netstat.InterfaceStat)
+	interfaces, interfaceErr := netstat.InterfacesWithContext(ctx)
+	warn("network interfaces", interfaceErr)
 	if c.routesAt.IsZero() || now.Sub(c.routesAt) >= 15*time.Second {
 		c.defaultInterfaces = platform.DefaultInterfaces(ctx)
 		c.routesAt = now
 	}
-	visibility := make(map[string]platform.NetworkInfo)
-	for _, v := range interfaces {
-		ifaces[v.Name] = v
-	}
-	elapsed = now.Sub(c.netAt).Seconds()
-	nc, err := netstat.IOCountersWithContext(ctx, true)
-	warn("network", err)
-	if err == nil {
-		next := make(map[string]netstat.IOCountersStat)
-		for _, v := range nc {
-			info := ifaces[v.Name]
-			loopback := false
-			up := false
-			for _, f := range info.Flags {
-				if f == "loopback" {
-					loopback = true
-				}
-				if f == "up" {
-					up = true
-				}
-			}
-			_, known := ifaces[v.Name]
-			meta := platform.NetworkInfo{Name: v.Name, Known: known, Up: up, Loopback: loopback, DefaultRoute: c.defaultInterfaces[v.Name]}
-			n := Network{Name: v.Name, Up: up, Received: v.BytesRecv, Sent: v.BytesSent, Errors: v.Errin + v.Errout, Drops: v.Dropin + v.Dropout, ReceiveRate: missing(), SendRate: missing()}
-			for _, a := range info.Addrs {
-				n.Addresses = append(n.Addresses, a.Addr)
-			}
-			meta.Addresses = n.Addresses
-			if !platform.UsefulNetwork(meta) {
-				continue
-			}
-			next[v.Name] = v
-			visibility[n.Name] = meta
-			if old, ok := c.nets[v.Name]; ok && elapsed > 0 {
-				n.ReceiveRate = rate(v.BytesRecv, old.BytesRecv, elapsed)
-				n.SendRate = rate(v.BytesSent, old.BytesSent, elapsed)
-			}
-			s.Networks = append(s.Networks, n)
-		}
-		s.Networks = visibleNetworks(s.Networks, visibility)
-		c.nets = next
-		c.netAt = now
-	}
+	networkCounters, networkErr := netstat.IOCountersWithContext(ctx, true)
+	warn("network", networkErr)
+	s.Networks = c.sampleNetworks(time.Now(), interfaces, networkCounters, interfaceErr, networkErr)
+	s.NetworkInventoryUnavailable = interfaceErr != nil && networkErr != nil
 	// Backends bound external commands themselves. Native reads across many
 	// devices share the overall sampling deadline, rather than losing tail GPUs.
 	s.GPUs, err = c.gpu.Sample(ctx)
@@ -312,35 +244,33 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 		}
 	}
 	c.lastNPUs = append([]platform.NPU(nil), s.NPUs...)
-	pids, err := process.PidsWithContext(ctx)
-	warn("process list", err)
-	if err == nil {
-		s.ProcessCount = len(pids)
-		c.metadata.ProcessCount = s.ProcessCount
-	}
-	if err == nil && withProcesses && (c.processesAt.IsZero() || now.Sub(c.processesAt) >= time.Second) {
-		ps, err := c.readProcesses(ctx, pids, now)
-		warn("process metrics", err)
-		if err == nil {
-			c.processes = ps
-			c.processesAt = now
-		}
-	}
 	c.applyResources(&s, now)
 	frequency := platform.ReadCPUFrequency(ctx, s.CPU.IDs)
 	s.CPU.MHz, s.CPU.MinMHz, s.CPU.MaxMHz = frequency.MHz, frequency.MinMHz, frequency.MaxMHz
 	s.CPU.FrequencyReported = frequency.Reported
-	s.Volumes = c.mounts["unmapped"]
-	if len(s.Disks) == 0 {
-		// A failed I/O sample can still have usable, cached filesystem sizes.
-		s.Volumes = nil
-		for _, volumes := range c.mounts {
-			s.Volumes = append(s.Volumes, volumes...)
+	pids, err := process.PidsWithContext(ctx)
+	warn("process list", err)
+	s.ProcessCountUnavailable = err != nil
+	s.ProcessCount = len(pids)
+	if !withProcesses {
+		c.sweep = nil
+	} else if err == nil && (c.processesAt.IsZero() || now.Sub(c.processesAt) >= time.Second) {
+		ps, err := c.readProcesses(ctx, pids, readProcess)
+		warn("process metrics", err)
+		if err == nil {
+			c.processes = ps
+			c.processesAt = now
+			c.processListTotal = len(pids)
 		}
-		sort.Slice(s.Volumes, func(i, j int) bool { return s.Volumes[i].Path < s.Volumes[j].Path })
 	}
+	// Keep capacity visible even when only some devices have I/O counters.
+	for _, volumes := range mounts {
+		s.Volumes = append(s.Volumes, volumes...)
+	}
+	sort.Slice(s.Volumes, func(i, j int) bool { return s.Volumes[i].Path < s.Volumes[j].Path })
 	s.Processes = c.processes
 	s.ProcessesAt = c.processesAt
+	s.ProcessListTotal = c.processListTotal
 	return s
 }
 func cpuUsage(a, b cpu.TimesStat) float64 {
@@ -363,91 +293,6 @@ func rate(current, previous uint64, seconds float64) float64 {
 		return missing()
 	}
 	return float64(current-previous) / seconds
-}
-func (c *Collector) readMounts(ctx context.Context, names []string) error {
-	mounts := make(map[string][]Mount)
-	parts, err := disk.PartitionsWithContext(ctx, false)
-	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	for _, p := range usefulPartitions(parts) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if seen[p.Mountpoint] {
-			continue
-		}
-		seen[p.Mountpoint] = true
-		name := ""
-		for _, n := range names {
-			if platform.MountBelongs(p.Device, n) {
-				name = n
-				break
-			}
-		}
-		// APFS synthesized volume devices cannot reliably be mapped to physical I/O
-		// devices with gopsutil. Report them as unmapped volumes in disk details.
-		if name == "" {
-			name = "unmapped"
-		}
-		u, e := disk.UsageWithContext(ctx, p.Mountpoint)
-		if e == nil {
-			mounts[name] = append(mounts[name], Mount{p.Mountpoint, p.Fstype, u.Total, u.Used, u.Free, u.UsedPercent})
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// A container's root may have capacity but be absent from the physical
-	// partition list (for example overlayfs or a bind-mounted root).
-	if !seen["/"] {
-		u, err := disk.UsageWithContext(ctx, "/")
-		if err != nil {
-			return err
-		}
-		mounts["unmapped"] = append(mounts["unmapped"], Mount{"/", u.Fstype, u.Total, u.Used, u.Free, u.UsedPercent})
-	}
-	c.mounts = mounts
-	return nil
-}
-func (c *Collector) readProcesses(ctx context.Context, pids []int32, at time.Time) ([]Process, error) {
-	rows := make([]Process, 0, len(pids))
-	next := make(map[int32]processCounter, len(pids))
-	for _, pid := range pids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		p, e := process.NewProcessWithContext(ctx, pid)
-		if e != nil {
-			continue
-		}
-		name, e := p.NameWithContext(ctx)
-		if e != nil {
-			name = "N/A"
-		}
-		created, _ := p.CreateTimeWithContext(ctx)
-		ppid, _ := p.PpidWithContext(ctx)
-		mi, _ := p.MemoryInfoWithContext(ctx)
-		threads, threadsErr := p.NumThreadsWithContext(ctx)
-		r := Process{PID: pid, PPID: ppid, Name: name, Created: created, CPU: missing(), Threads: threads, ThreadsKnown: threadsErr == nil && threads > 0}
-		if mi != nil && (runtime.GOOS != "darwin" || threads > 0) {
-			r.MemoryKnown = true
-			r.RSS = mi.RSS
-			r.VMS = mi.VMS
-		}
-		t, e := p.TimesWithContext(ctx)
-		if e == nil && (runtime.GOOS != "darwin" || threads > 0) {
-			total := t.User + t.System
-			if prev, ok := c.proc[pid]; ok && created > 0 && created == prev.created && at.After(prev.at) && total >= prev.total {
-				r.CPU = (total - prev.total) / at.Sub(prev.at).Seconds() * 100
-			}
-			next[pid] = processCounter{total, created, at}
-		}
-		rows = append(rows, r)
-	}
-	c.proc = next
-	return rows, nil
 }
 func (c *Collector) Detail(ctx context.Context, row Process) (Detail, error) {
 	d := Detail{Process: row}

@@ -49,7 +49,7 @@ func TestCgroupV2AncestorsAndSharedHeadroom(t *testing.T) {
 	put(t, root, "sys/fs/cgroup/jobs/memory.current", "2040109465")
 	put(t, root, "sys/fs/cgroup/jobs/child/memory.stat", "file 100\nfile_dirty 10\n")
 	r := detectLimits(root, []int{0, 1, 4, 5, 6}, noEnv, 192, 512*GiB)
-	if !reflect.DeepEqual(r.AllowedCPUs, []int{4, 5, 6}) || r.CPUCapacity != 2.5 || r.CPUUsageNS != 123456000 {
+	if !reflect.DeepEqual(r.AllowedCPUs, []int{4, 5, 6}) || r.CPUCapacity != 2.5 || r.CPUGroupCPUs != 4 || r.CPUUsageNS != 123456000 {
 		t.Fatalf("CPU: %+v", r)
 	}
 	if r.MemoryLimit != GiB || !r.MemoryLimited || r.MemoryRoom != 107374183 || !r.MemoryUsageKnown || r.MemoryDirty != 10 {
@@ -68,8 +68,17 @@ func TestCgroupV1AndUnlimitedSentinel(t *testing.T) {
 	put(t, root, "cg/mem/job/memory.usage_in_bytes", "1073741824")
 	put(t, root, "cg/mem/memory.limit_in_bytes", "9223372036854771712")
 	r := detectLimits(root, []int{0, 1, 2, 3, 4, 5, 6, 7}, noEnv, 192, 512*GiB)
-	if r.CPUCapacity != 1.5 || len(r.AllowedCPUs) != 4 || r.MemoryLimit != 4*GiB || r.MemoryCurrent != GiB {
+	if r.CPUCapacity != 1.5 || len(r.AllowedCPUs) != 4 || r.CPUGroupCPUs != 192 || r.MemoryLimit != 4*GiB || r.MemoryCurrent != GiB {
 		t.Fatalf("%+v", r)
+	}
+	// The same cpuset bounds the accounting group only when the
+	// controllers share a hierarchy.
+	put(t, root, "proc/self/cgroup", "2:cpu,cpuacct,cpuset:/job\n")
+	put(t, root, "proc/self/mountinfo", "1 0 0:1 / /cg/cpu rw - cgroup cgroup rw,cpu,cpuacct,cpuset\n")
+	put(t, root, "cg/cpu/job/cpuset.cpus", "2-5")
+	r = detectLimits(root, []int{2, 3}, noEnv, 192, 512*GiB)
+	if !r.CPUUsageKnown || r.CPUGroupCPUs != 4 || len(r.AllowedCPUs) != 2 {
+		t.Fatalf("incorrect CPU accounting scope: %+v", r)
 	}
 }
 func TestNamespacedRootAndZeroMemoryLimit(t *testing.T) {
@@ -192,6 +201,31 @@ func TestHybridCgroupCountersFollowTheirController(t *testing.T) {
 		r := detectLimits(root, []int{0, 1}, noEnv, 2, GiB)
 		if !r.MemoryUsageKnown || r.MemoryCurrent != 2048 || r.CPUUsageNS != 1200 || r.CPUCapacity != .5 {
 			t.Fatalf("wrong counters for mount order %q: %+v", mounts, r)
+		}
+	}
+}
+
+func TestV1MemoryCountersFollowUsageScope(t *testing.T) {
+	for _, tc := range []struct {
+		hierarchy, stats           string
+		cached, dirty, reclaimable uint64
+	}{
+		{"1", "total_cache 300\ntotal_dirty 20\ntotal_inactive_file 80", 300, 20, 80},
+		{"0", "total_cache 300\ntotal_dirty 20\ntotal_inactive_file 80", 100, 4, 10},
+		{"1", "", 100, 4, 10},
+		{"1", "total_cache 0\ntotal_dirty 0\ntotal_inactive_file 0", 0, 0, 0},
+	} {
+		root := t.TempDir()
+		put(t, root, "proc/self/cgroup", "1:memory:/job")
+		put(t, root, "proc/self/mountinfo", "1 0 0:1 / /mem rw - cgroup cgroup rw,memory")
+		put(t, root, "mem/job/memory.use_hierarchy", tc.hierarchy)
+		put(t, root, "mem/job/memory.limit_in_bytes", "2048")
+		put(t, root, "mem/job/memory.usage_in_bytes", "1024")
+		put(t, root, "mem/job/memory.stat", "cache 100\ndirty 4\ninactive_file 10\n"+tc.stats)
+		r := detectLimits(root, []int{0, 1}, noEnv, 2, GiB)
+		if !r.MemoryStatsKnown || !r.MemoryDirtyKnown || r.MemoryCached != tc.cached || r.MemoryDirty != tc.dirty ||
+			r.MemoryReclaimable != tc.reclaimable || r.MemoryRoom != 1024+tc.reclaimable {
+			t.Errorf("hierarchy %s: cache %d, dirty %d, reclaimable %d, headroom %d", tc.hierarchy, r.MemoryCached, r.MemoryDirty, r.MemoryReclaimable, r.MemoryRoom)
 		}
 	}
 }
