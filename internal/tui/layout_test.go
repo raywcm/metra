@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/raywcm/metra/internal/collector"
 	"github.com/raywcm/metra/internal/platform"
 )
 
@@ -239,4 +240,55 @@ func TestRateUnitsKeepMetricRowsStable(t *testing.T) {
 			want = len(lines)
 		}
 	}
+}
+
+func TestProcessSearchFitsShortViewport(t *testing.T) {
+	m, _ := model(t)
+	m.tab = 1
+	m.settings.Language = "en"
+	m.Update(key("/"))
+	m.Update(tea.PasteMsg{Content: "worker"})
+	for _, height := range []int{4, 5, 6, 7} {
+		m.Update(tea.WindowSizeMsg{Width: 40, Height: height})
+		view := ansi.Strip(m.View().Content)
+		if !strings.Contains(view, "Search › worker") {
+			t.Fatal("search input disappeared", height, view)
+		}
+		if height >= 5 && !strings.Contains(view, "12.0") {
+			t.Fatal("result disappeared", height, view)
+		}
+	}
+}
+
+func TestHelpScrollReversesImmediatelyAtBottom(t *testing.T) {
+	m, _ := model(t)
+	m.Update(tea.WindowSizeMsg{Width: 34, Height: 8})
+	m.Update(key("?"))
+	for i := 0; i < 100; i++ {
+		m.Update(key("down"))
+	}
+	bottom := m.View().Content
+	m.Update(key("up"))
+	if bottom == m.View().Content {
+		t.Fatal("help scroll stuck at the bottom")
+	}
+}
+
+func TestVolumesAccessibleWithoutDiskCounters(t *testing.T) {
+	m, _ := model(t)
+	s := fixture()
+	s.Disks = nil
+	s.Volumes = []collector.Mount{{Path: "/", FSType: "overlay", Total: 2 << 30, Used: 1 << 30}}
+	m.Update(sampleMsg{snapshot: s})
+	for i, tab := range m.tabs {
+		if tab.ID == "volumes" {
+			m.tab = i
+			view := ansi.Strip(m.View().Content)
+			if !strings.Contains(view, "overlay") || !strings.Contains(view, "2.0 GiB") {
+				t.Fatal(view)
+			}
+			return
+		}
+	}
+	t.Fatal("mounted root volume cannot be inspected")
 }

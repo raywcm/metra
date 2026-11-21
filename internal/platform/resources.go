@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,6 +133,15 @@ func membership(text string) map[string]string {
 	}
 	return out
 }
+
+// Membership "/" in a cgroup namespace refers to the mounted hierarchy root.
+func (m resourceMount) groupIdentity(member string) string {
+	if member == "/" {
+		return m.root
+	}
+	return member
+}
+
 func groupPath(m resourceMount, group string) (string, bool) {
 	root := filepath.Clean(m.root)
 	group = filepath.Clean(group)
@@ -206,6 +216,7 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 	memoryPath := ""
 	memoryV2 := false
 	cpuPath := ""
+	cpuGroup, memoryGroup := "", ""
 
 	applyCPU := func(v float64) {
 		if !math.IsNaN(v) && (math.IsNaN(r.CPUQuota) || v < r.CPUQuota) {
@@ -250,9 +261,12 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 			if !ok {
 				continue
 			}
-			cpuPath = path
-			memoryPath = path
-			memoryV2 = true
+			if _, legacy := groups["cpu"]; !legacy {
+				cpuPath, cpuGroup = path, m.groupIdentity(group)
+			}
+			if _, legacy := groups["memory"]; !legacy {
+				memoryPath, memoryGroup, memoryV2 = path, m.groupIdentity(group), true
+			}
 			for _, dir := range ancestors(path, m.point) {
 				applyCPU(cpuQuota(f.read(filepath.Join(dir, "cpu.max"))))
 				if ids, e := parseCPUList(f.read(filepath.Join(dir, "cpuset.cpus.effective"))); e == nil && len(ids) > 0 {
@@ -265,7 +279,7 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 				}
 			}
 			stat := counters(f.read(filepath.Join(path, "cpu.stat")))
-			if usage, ok := stat["usage_usec"]; ok && usage <= math.MaxUint64/1000 {
+			if usage, ok := stat["usage_usec"]; ok && cpuPath == path && usage <= math.MaxUint64/1000 {
 				r.CPUUsageNS = usage * 1000
 				r.CPUUsageKnown = true
 			}
@@ -284,7 +298,7 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 				}
 				switch controller {
 				case "cpu":
-					cpuPath = path
+					cpuPath, cpuGroup = path, m.groupIdentity(group)
 					for _, dir := range ancestors(path, m.point) {
 						q := f.read(filepath.Join(dir, "cpu.cfs_quota_us"))
 						p := f.read(filepath.Join(dir, "cpu.cfs_period_us"))
@@ -305,7 +319,7 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 						}
 					}
 				case "memory":
-					memoryPath = path
+					memoryPath, memoryGroup, memoryV2 = path, m.groupIdentity(group), false
 					for _, dir := range ancestors(path, m.point) {
 						if dir != path && f.read(filepath.Join(dir, "memory.use_hierarchy")) == "0" {
 							continue
@@ -344,7 +358,8 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 	if !math.IsNaN(r.CPUQuota) {
 		r.CPUCapacity = math.Min(r.CPUCapacity, r.CPUQuota)
 	}
-	if env("SLURM_JOB_ID") != "" {
+	jobID := env("SLURM_JOB_ID")
+	if jobID != "" {
 		if cpus, e := strconv.ParseFloat(slurmCPU(env), 64); e == nil && cpus > 0 && cpus < r.CPUCapacity {
 			r.CPUCapacity = cpus
 			r.SchedulerCPU = true
@@ -365,13 +380,13 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 				r.MemoryLimit = limit
 				r.SchedulerMemory = true
 				r.MemoryLimitKnown = true
-				if !strings.Contains(memoryPath, "slurm") && !strings.Contains(memoryPath, "job_"+env("SLURM_JOB_ID")) {
+				if !slurmJobGroup(memoryGroup, jobID) {
 					r.MemoryUsageKnown = false
 				}
 			}
 		}
 	}
-	if r.SchedulerCPU && !strings.Contains(cpuPath, "slurm") && !strings.Contains(cpuPath, "job_"+env("SLURM_JOB_ID")) {
+	if r.SchedulerCPU && !slurmJobGroup(cpuGroup, jobID) {
 		r.CPUUsageKnown = false
 	}
 	r.Partial = denied
@@ -395,6 +410,11 @@ func countersFromStatus(text string) map[string]uint64 {
 		}
 	}
 	return out
+}
+
+func slurmJobGroup(path, jobID string) bool {
+	parts := strings.Split(path, "/")
+	return slices.Contains(parts, "job_"+jobID) || slices.Contains(parts, "job_"+jobID+".scope")
 }
 
 func slurmCPU(env func(string) string) string {

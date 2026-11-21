@@ -2,6 +2,8 @@ package collector
 
 import (
 	"context"
+	"errors"
+	"github.com/raywcm/metra/internal/platform"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"math"
 	"os"
@@ -68,5 +70,37 @@ func TestLocalSamplingAndProcessIdentity(t *testing.T) {
 	self.Created--
 	if _, err = c.Detail(ctx, self); err == nil {
 		t.Fatal("accepted reused PID")
+	}
+}
+
+func TestPartialCPUCounterResetIsMissing(t *testing.T) {
+	before := cpu.TimesStat{User: 12, System: 20, Idle: 100}
+	after := cpu.TimesStat{User: 8, System: 25, Idle: 102}
+	if got := cpuUsage(before, after); !math.IsNaN(got) {
+		t.Fatal("reported usage across reset", got)
+	}
+}
+
+type gpuSamples struct{ calls int }
+
+func (g *gpuSamples) Sample(context.Context) ([]platform.GPU, error) {
+	g.calls++
+	if g.calls == 1 {
+		device := platform.EmptyGPU("test", "GPU", "fixture")
+		device.Engines = []platform.Engine{{ID: "compute", Utilization: 20}}
+		return []platform.GPU{device}, errors.New("partial sample")
+	}
+	return nil, errors.New("temporary failure")
+}
+
+func TestDeviceDiscoveredOnPartialSampleSurvivesFailure(t *testing.T) {
+	c := &Collector{gpu: &gpuSamples{}, npu: platform.NewNPU()}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.Sample(ctx, false)
+	s := c.Sample(ctx, false)
+	if len(s.GPUs) != 1 || s.GPUs[0].ID != "test" || !math.IsNaN(s.GPUs[0].Utilization) || len(s.GPUs[0].Engines) != 1 {
+		t.Fatal("device identity lost or stale reading reused", s.GPUs)
 	}
 }

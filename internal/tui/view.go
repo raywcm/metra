@@ -35,14 +35,10 @@ func (m *Model) View() tea.View {
 			header = fit(p.accent.Render(" metra v"+m.version)+" · "+p.text.Render(m.pageHint())+" "+p.muted.Render(m.status), w)
 		}
 		body := m.tr("Collecting hardware information…")
-		if m.ready || m.current().Kind == "settings" {
+		if m.help || m.modal != "" {
+			body = m.overlayBody(bodyW)
+		} else if m.ready || m.current().Kind == "settings" {
 			body = m.page(bodyW, areaH)
-		}
-		if m.help {
-			body = m.helpView()
-		}
-		if m.modal != "" {
-			body = m.modalView(bodyW)
 		}
 		lines := strings.Split(body, "\n")
 		if len(lines) > areaH {
@@ -51,7 +47,7 @@ func (m *Model) View() tea.View {
 				start = min(m.overlayScroll, len(lines)-areaH)
 			} else if m.current().Kind == "settings" {
 				start = min(max(0, 1+m.setting-areaH+1), len(lines)-areaH)
-			} else if m.current().Kind != "processes" && m.current().Kind != "network" {
+			} else if m.current().Kind != "processes" {
 				start = min(m.scroll, len(lines)-areaH)
 			}
 			lines = lines[start : start+areaH]
@@ -131,7 +127,11 @@ func (m *Model) tabBar(w int) string {
 	start, used := 0, 0
 	for i := 0; i <= m.tab; i++ {
 		used += ansi.StringWidth(labels[i])
-		for used > w-2 && start < i {
+		budget := w
+		if i < len(labels)-1 {
+			budget -= 2
+		}
+		for start < i && (used > budget || (start > 0 && used+2 > budget)) {
 			used -= ansi.StringWidth(labels[start])
 			start++
 		}
@@ -141,7 +141,11 @@ func (m *Model) tabBar(w int) string {
 		out = p.muted.Render("‹ ")
 	}
 	for i := start; i < len(labels); i++ {
-		if ansi.StringWidth(out)+ansi.StringWidth(labels[i]) > w-2 {
+		budget := w
+		if i < len(labels)-1 {
+			budget -= 2
+		}
+		if ansi.StringWidth(out)+ansi.StringWidth(labels[i]) > budget {
 			out += p.muted.Render(" ›")
 			break
 		}
@@ -164,6 +168,8 @@ func (m *Model) page(w, h int) string {
 		if t.Index < len(m.snapshot.Disks) {
 			return m.diskView(t.Index, w, h)
 		}
+	case "volumes":
+		return m.title(m.tr("Volumes"), "") + "\n" + strings.Join(metricLines(m.volumeDetails(), w), "\n")
 	case "network":
 		return m.networkView(w, h)
 	case "gpu":
@@ -264,7 +270,7 @@ func (m *Model) overview(w, h int) string {
 	if s.CPU.TemperatureKnown {
 		cpuValue += " · " + number(s.CPU.Temperature) + " °C"
 	}
-	cards := []card{{"CPU", cpuValue, []string{"cpu"}, p.cpu, 100, s.CPU.Percent}, {m.tr("Memory"), percent(s.Memory.Percent) + " · " + bytes(float64(s.Memory.Used)), []string{"memory"}, p.memory, 100, s.Memory.Percent}}
+	cards := []card{{"CPU", cpuValue, []string{"cpu"}, p.cpu, 100, s.CPU.Percent}, {m.tr("Memory"), percent(s.Memory.Percent) + " · " + knownBytes(s.Memory.Used, s.Memory.UsageKnown), []string{"memory"}, p.memory, 100, s.Memory.Percent}}
 	for i, d := range s.Disks {
 		cards = append(cards, card{m.tr("Disk%d", i) + " · " + d.Name, percent(d.CombinedBusy) + " · R " + speed(d.ReadRate) + " W " + speed(d.WriteRate), []string{"disk:" + d.ID + ":combined"}, p.disk, 100, d.CombinedBusy})
 	}
@@ -401,7 +407,7 @@ func (m *Model) memoryView(w, h int) string {
 	if s.Total == 0 && !m.snapshot.Limits.MemoryLimitKnown {
 		return m.title(m.tr("Memory"), "") + "\n" + m.tr("No readable live counters")
 	}
-	known := s.UsageKnown || (!s.Limited && s.Total > 0 && finite(s.Percent))
+	known := s.UsageKnown
 	var values []string
 	if s.SwapKnown {
 		usage := math.NaN()
@@ -419,7 +425,7 @@ func (m *Model) memoryView(w, h int) string {
 			bar = candidate
 		}
 	}
-	if bar == "" {
+	if bar == "" && known {
 		values = append(values, m.memoryLegend()...)
 	}
 	details := metricLines(values, w)
@@ -504,15 +510,21 @@ func (m *Model) diskView(i, w, h int) string {
 		values = append(values, m.tr("%s (%s) · %s / %s used", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
 	}
 	if i == 0 {
-		for _, v := range m.snapshot.Volumes {
-			values = append(values, m.tr("Volume %s (%s) · %s / %s", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
-		}
+		values = append(values, m.volumeDetails()...)
 	}
 	details := metricLines(values, w)
 	lines := []string{m.title(m.tr("Disk%d", i), d.Name), m.panelLayout(panels, w, h-1-len(details), 1)}
 	lines = append(lines, details...)
 	return strings.Join(lines, "\n")
 }
+func (m *Model) volumeDetails() []string {
+	var details []string
+	for _, v := range m.snapshot.Volumes {
+		details = append(details, m.tr("Volume %s (%s) · %s / %s", clean(v.Path), clean(v.FSType), bytes(float64(v.Used)), bytes(float64(v.Total))))
+	}
+	return details
+}
+
 func (m *Model) networkView(w, h int) string {
 	if len(m.snapshot.Networks) == 0 {
 		return m.tr("Network") + "\n" + m.tr("No active network interfaces.")
@@ -873,10 +885,15 @@ func (m *Model) processView(w, h int) string {
 		return p.muted.Bold(true).Render(label)
 	}
 	lines = append(lines, format(header("pid", "PID"), header("name", m.tr("NAME")), header("cpu", "CPU %"), header("memory", "RSS"), p.muted.Render(m.tr("THREADS"))))
-	if h <= 2 {
-		lines = nil
+	if len(lines) >= h {
+		// Drop headings first so a short viewport still shows the active filter.
+		if m.searching || m.query != "" {
+			lines = lines[1:2]
+		} else {
+			lines = nil
+		}
 	}
-	count := max(1, h-len(lines))
+	count := max(0, h-len(lines))
 	pool := m.snapshot.Memory.HostTotal
 	if pool == 0 {
 		pool = m.snapshot.Memory.Total
@@ -935,7 +952,14 @@ func (m *Model) settingsView() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *Model) modalView(w int) string {
+func (m *Model) overlayBody(width int) string {
+	if m.modal != "" {
+		return ansi.Hardwrap(m.modalView(), width, true)
+	}
+	return ansi.Hardwrap(m.helpView(), width, true)
+}
+
+func (m *Model) modalView() string {
 	p := m.palette()
 	t := m.target
 	switch m.modal {
@@ -951,7 +975,7 @@ func (m *Model) modalView(w int) string {
 		if d.Err != "" {
 			body += "\n" + p.muted.Render(clean(d.Err))
 		}
-		return ansi.Hardwrap(body, w, true) + "\n\n" + m.tr("Enter / Esc to close")
+		return body + "\n\n" + m.tr("Enter / Esc to close")
 	}
 	return ""
 }
@@ -994,7 +1018,7 @@ func (m *Model) pageHint() string {
 			extra = m.tr("c cores")
 		}
 	case "network":
-		extra = m.tr("↑/↓ interface")
+		extra = m.tr("↑/↓ interface · PgUp/PgDn scroll")
 	}
 	if extra != "" && ansi.StringWidth(" metra "+common+" · "+extra) <= m.width {
 		return common + " · " + extra

@@ -82,3 +82,13 @@ func TestNetworkSelectionSurvivesInterfaceReordering(t *testing.T) {
 		t.Fatal("VPN traffic was counted twice", total)
 	}
 }
+
+func BenchmarkDeepProcessTree(b *testing.B) {
+	processes := make([]collector.Process, 2000)
+	for i := range processes {
+		processes[i] = collector.Process{PID: int32(i + 1), PPID: int32(i), Name: "worker"}
+	}
+	for b.Loop() {
+		processRows(processes, "worker", "pid", false, true)
+	}
+}

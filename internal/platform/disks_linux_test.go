@@ -37,3 +37,20 @@ func TestPhysicalDisksExcludeEmptyDevices(t *testing.T) {
 		t.Fatal("mapped LVM alias lost its physical association")
 	}
 }
+
+func TestMountBelongsToNumberedLinuxDisk(t *testing.T) {
+	for _, tc := range []struct {
+		device, disk string
+		want         bool
+	}{
+		{"nvme0n10", "nvme0n1", false},
+		{"dm-10", "dm-1", false},
+		{"nvme0n1p10", "nvme0n1", true},
+		{"mmcblk0p1", "mmcblk0", true},
+		{"sda10", "sda", true},
+	} {
+		if got := MountBelongs("/dev/"+tc.device, tc.disk); got != tc.want {
+			t.Errorf("%s assigned to %s = %v", tc.device, tc.disk, got)
+		}
+	}
+}

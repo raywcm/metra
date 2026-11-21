@@ -228,6 +228,9 @@ func roundedBarWidths(values []float64, total float64, width int) []int {
 }
 
 func (m *Model) compactValue() string {
+	if !m.ready && m.current().Kind != "settings" {
+		return m.tr("Collecting hardware information…")
+	}
 	s := m.snapshot
 	t := m.current()
 	p := m.palette()
@@ -235,7 +238,7 @@ func (m *Model) compactValue() string {
 	case "overview", "cpu":
 		return "CPU " + m.heatPercent(s.CPU.Percent, p.cpu) + " · " + m.tr("Memory") + " " + m.heatPercent(s.Memory.Percent, p.memory)
 	case "memory":
-		return m.tr("Memory") + " " + m.heatPercent(s.Memory.Percent, p.memory) + " · " + bytes(float64(s.Memory.Used))
+		return m.tr("Memory") + " " + m.heatPercent(s.Memory.Percent, p.memory) + " · " + knownBytes(s.Memory.Used, s.Memory.UsageKnown)
 	case "gpu":
 		if t.Index < len(s.GPUs) {
 			return m.tabLabel(t) + " " + m.heatPercent(s.GPUs[t.Index].Utilization, p.gpu)
@@ -266,13 +269,14 @@ func bodySize(width, height int) (int, int, int) {
 
 func (m *Model) processRowsVisible() int {
 	_, height, _ := bodySize(m.width, m.height)
-	if height <= 2 {
-		return height
-	}
+	filterRows := 0
 	if m.searching || m.query != "" {
-		height--
+		filterRows = 1
 	}
-	return max(1, height-2)
+	if height <= 2+filterRows {
+		return max(1, height-filterRows)
+	}
+	return height - 2 - filterRows
 }
 
 func (m *Model) hardwareScrollMax() int {

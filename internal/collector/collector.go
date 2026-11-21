@@ -172,18 +172,23 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 	elapsed := now.Sub(c.diskAt).Seconds()
 	counters, err := disk.IOCountersWithContext(ctx)
 	warn("disk I/O", err)
+	var names []string
 	if err == nil {
-		names := make([]string, 0, len(counters))
 		for name := range counters {
 			if platform.PhysicalDisk(name) {
 				names = append(names, name)
 			}
 		}
 		sort.Strings(names)
-		if c.mounts == nil || now.Sub(c.mountsAt) > 15*time.Second {
-			c.readMounts(ctx, names)
+	}
+	if c.mounts == nil || now.Sub(c.mountsAt) >= 15*time.Second {
+		if mountErr := c.readMounts(ctx, names); mountErr != nil {
+			warn("mounts", mountErr)
+		} else {
 			c.mountsAt = now
 		}
+	}
+	if err == nil {
 		for _, name := range names {
 			v := counters[name]
 			d := Disk{CombinedBusy: missing(), ID: name, Name: name, ReadRate: missing(), WriteRate: missing(), Busy: missing(), ReadBusy: missing(), WriteBusy: missing(), ReadBytes: v.ReadBytes, WriteBytes: v.WriteBytes, ReadOps: v.ReadCount, WriteOps: v.WriteCount, Mounts: c.mounts[name]}
@@ -282,9 +287,8 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 				s.GPUs = append(s.GPUs, platform.UnavailableGPU(g))
 			}
 		}
-	} else {
-		c.lastGPUs = append([]platform.GPU(nil), s.GPUs...)
 	}
+	c.lastGPUs = append([]platform.GPU(nil), s.GPUs...)
 	s.NPUs, err = c.npu.Sample(ctx)
 	warn("NPU", err)
 	for i := range s.NPUs {
@@ -306,15 +310,15 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 				s.NPUs = append(s.NPUs, platform.UnavailableNPU(n))
 			}
 		}
-	} else {
-		c.lastNPUs = append([]platform.NPU(nil), s.NPUs...)
 	}
+	c.lastNPUs = append([]platform.NPU(nil), s.NPUs...)
 	pids, err := process.PidsWithContext(ctx)
 	warn("process list", err)
 	if err == nil {
 		s.ProcessCount = len(pids)
+		c.metadata.ProcessCount = s.ProcessCount
 	}
-	if withProcesses && (c.processesAt.IsZero() || now.Sub(c.processesAt) >= time.Second) {
+	if err == nil && withProcesses && (c.processesAt.IsZero() || now.Sub(c.processesAt) >= time.Second) {
 		ps, err := c.readProcesses(ctx, pids, now)
 		warn("process metrics", err)
 		if err == nil {
@@ -327,11 +331,23 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 	s.CPU.MHz, s.CPU.MinMHz, s.CPU.MaxMHz = frequency.MHz, frequency.MinMHz, frequency.MaxMHz
 	s.CPU.FrequencyReported = frequency.Reported
 	s.Volumes = c.mounts["unmapped"]
+	if len(s.Disks) == 0 {
+		// A failed I/O sample can still have usable, cached filesystem sizes.
+		s.Volumes = nil
+		for _, volumes := range c.mounts {
+			s.Volumes = append(s.Volumes, volumes...)
+		}
+		sort.Slice(s.Volumes, func(i, j int) bool { return s.Volumes[i].Path < s.Volumes[j].Path })
+	}
 	s.Processes = c.processes
 	s.ProcessesAt = c.processesAt
 	return s
 }
 func cpuUsage(a, b cpu.TimesStat) float64 {
+	if b.User < a.User || b.System < a.System || b.Nice < a.Nice || b.Idle < a.Idle ||
+		b.Iowait < a.Iowait || b.Irq < a.Irq || b.Softirq < a.Softirq || b.Steal < a.Steal {
+		return missing()
+	}
 	total := func(t cpu.TimesStat) float64 {
 		return t.User + t.System + t.Idle + t.Nice + t.Iowait + t.Irq + t.Softirq + t.Steal
 	}
@@ -348,16 +364,16 @@ func rate(current, previous uint64, seconds float64) float64 {
 	}
 	return float64(current-previous) / seconds
 }
-func (c *Collector) readMounts(ctx context.Context, names []string) {
-	c.mounts = make(map[string][]Mount)
+func (c *Collector) readMounts(ctx context.Context, names []string) error {
+	mounts := make(map[string][]Mount)
 	parts, err := disk.PartitionsWithContext(ctx, false)
 	if err != nil {
-		return
+		return err
 	}
 	seen := map[string]bool{}
 	for _, p := range usefulPartitions(parts) {
-		if ctx.Err() != nil {
-			return
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if seen[p.Mountpoint] {
 			continue
@@ -377,9 +393,23 @@ func (c *Collector) readMounts(ctx context.Context, names []string) {
 		}
 		u, e := disk.UsageWithContext(ctx, p.Mountpoint)
 		if e == nil {
-			c.mounts[name] = append(c.mounts[name], Mount{p.Mountpoint, p.Fstype, u.Total, u.Used, u.Free, u.UsedPercent})
+			mounts[name] = append(mounts[name], Mount{p.Mountpoint, p.Fstype, u.Total, u.Used, u.Free, u.UsedPercent})
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A container's root may have capacity but be absent from the physical
+	// partition list (for example overlayfs or a bind-mounted root).
+	if !seen["/"] {
+		u, err := disk.UsageWithContext(ctx, "/")
+		if err != nil {
+			return err
+		}
+		mounts["unmapped"] = append(mounts["unmapped"], Mount{"/", u.Fstype, u.Total, u.Used, u.Free, u.UsedPercent})
+	}
+	c.mounts = mounts
+	return nil
 }
 func (c *Collector) readProcesses(ctx context.Context, pids []int32, at time.Time) ([]Process, error) {
 	rows := make([]Process, 0, len(pids))

@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	MinIntervalMS = 500
+	MaxIntervalMS = 10000
+)
+
 type Settings struct {
 	IntervalMS   int    `json:"interval_ms"`
 	RangeSeconds int    `json:"range_seconds"`
@@ -22,8 +27,8 @@ func Defaults() Settings {
 }
 func (s Settings) Interval() time.Duration { return time.Duration(s.IntervalMS) * time.Millisecond }
 func (s Settings) Validate() error {
-	if s.IntervalMS < 500 || s.IntervalMS > 10000 {
-		return errors.New("interval must be 500–10000 ms")
+	if s.IntervalMS < MinIntervalMS || s.IntervalMS > MaxIntervalMS {
+		return fmt.Errorf("interval must be %d–%d ms", MinIntervalMS, MaxIntervalMS)
 	}
 	if s.RangeSeconds < 10 || s.RangeSeconds > 900 {
 		return errors.New("chart range must be 10–900 seconds")

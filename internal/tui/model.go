@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +51,8 @@ type Model struct {
 	settingsEditing                                          bool
 	savedSettings                                            config.Settings
 	version                                                  string
-	lastTab                                                  int
+	lastTab                                                  string
+	discardPending                                           bool
 	dark                                                     bool
 	terminalBackground                                       color.Color
 	historyGap                                               bool
@@ -122,6 +124,9 @@ func (m *Model) rebuildTabs() {
 	for i, d := range m.snapshot.Disks {
 		tabs = append(tabs, Tab{"disk:" + d.ID, fmt.Sprintf("Disk%d", i), "disk", i})
 	}
+	if len(m.snapshot.Disks) == 0 && len(m.snapshot.Volumes) > 0 {
+		tabs = append(tabs, Tab{"volumes", "Volumes", "volumes", 0})
+	}
 	tabs = append(tabs, Tab{"network", "Network", "network", 0})
 	for i, g := range m.snapshot.GPUs {
 		tabs = append(tabs, Tab{"gpu:" + g.ID, fmt.Sprintf("GPU%d", i), "gpu", i})
@@ -131,13 +136,16 @@ func (m *Model) rebuildTabs() {
 	}
 	tabs = append(tabs, Tab{"settings", "Settings", "settings", 0})
 	m.tabs = tabs
-	m.tab = 0
-	for i, t := range tabs {
+	m.tab = m.tabIndex(id)
+}
+
+func (m *Model) tabIndex(id string) int {
+	for i, t := range m.tabs {
 		if t.ID == id {
-			m.tab = i
-			break
+			return i
 		}
 	}
+	return 0
 }
 func (m *Model) remember() {
 	s := m.snapshot
@@ -255,10 +263,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	case sampleMsg:
 		m.inFlight = false
+		if m.discardPending || m.paused {
+			m.discardPending = false
+			if m.paused {
+				return m, nil
+			}
+			m.inFlight = true
+			return m, m.sample()
+		}
 		selectedNetwork := ""
 		if m.networkPinned && m.network >= 0 && m.network < len(m.snapshot.Networks) {
 			selectedNetwork = m.snapshot.Networks[m.network].Name
 		}
+		refreshProcesses := m.current().Kind == "processes" || !msg.snapshot.ProcessesAt.Equal(m.snapshot.ProcessesAt)
 		m.snapshot = msg.snapshot
 		m.network = 0
 		if selectedNetwork != "" {
@@ -277,21 +294,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.rebuildTabs()
 		m.remember()
-		m.refreshRows()
-		if !m.paused && m.current().Kind == "processes" && !msg.withProcesses {
+		if refreshProcesses {
+			m.refreshRows()
+		}
+		if m.current().Kind == "processes" && !msg.withProcesses {
 			m.inFlight = true
 			return m, m.sample()
 		}
 		return m, m.tick(m.settings.Interval() - msg.elapsed)
 	case tickMsg:
-		if msg.generation != m.generation {
+		if msg.generation != m.generation || m.paused || m.inFlight {
 			return m, nil
 		}
-		if !m.paused && !m.inFlight {
-			m.inFlight = true
-			return m, m.sample()
-		}
-		return m, m.tick(m.settings.Interval())
+		m.inFlight = true
+		return m, m.sample()
 	case detailMsg:
 		if m.modal == "loading" && m.target.PID == msg.target.PID && m.target.Created == msg.target.Created {
 			if msg.err != nil {
@@ -320,7 +336,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = m.tr("Settings saved")
 		}
 	case tea.KeyPressMsg:
-		previousTab := m.current().ID
 		key := msg.String()
 		if key == "ctrl+c" {
 			return m, tea.Quit
@@ -332,24 +347,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				return m, nil
 			}
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			m.query = m.input.Value()
-			m.processPinned = false
-			m.cursor, m.offset = 0, 0
-			m.refreshRows()
-			return m, cmd
+			return m, m.updateSearch(msg)
+		}
+		if (m.help || m.modal != "") && m.scrollOverlay(key) {
+			return m, nil
 		}
 		if m.modal != "" {
 			if m.modal == "terminating" {
-				return m, nil
-			}
-			if key == "down" || key == "j" {
-				m.overlayScroll++
-				return m, nil
-			}
-			if key == "up" || key == "k" {
-				m.overlayScroll = max(0, m.overlayScroll-1)
 				return m, nil
 			}
 			if key == "esc" || key == "n" || (key == "enter" && m.modal == "confirm") {
@@ -371,14 +375,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.help {
-			if key == "down" || key == "j" {
-				m.overlayScroll++
-				return m, nil
-			}
-			if key == "up" || key == "k" {
-				m.overlayScroll = max(0, m.overlayScroll-1)
-				return m, nil
-			}
 			if key == "?" || key == "esc" || key == "q" {
 				m.help = false
 			}
@@ -394,20 +390,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.help = true
 			m.overlayScroll = 0
 		case "left", "shift+tab":
-			m.selectTab(m.tab - 1)
+			return m, m.selectTab(m.tab - 1)
 		case "right", "tab":
-			m.selectTab(m.tab + 1)
+			return m, m.selectTab(m.tab + 1)
 		case ",":
 			m.selectTab(len(m.tabs) - 1)
 			m.settingsEditing = true
 			m.status = ""
 		case "space":
 			m.paused = !m.paused
-			if !m.paused {
-				m.historyGap = true
+			m.generation++
+			if m.paused {
+				m.discardPending = m.inFlight
+				return m, nil
 			}
-			if !m.paused && !m.inFlight {
-				m.generation++
+			m.historyGap = true
+			if !m.inFlight {
 				m.inFlight = true
 				return m, m.sample()
 			}
@@ -425,19 +423,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return m, m.pageKey(key)
 		}
-		if m.current().Kind == "processes" && m.current().ID != previousTab && !m.inFlight && !m.paused {
-			m.generation++
-			m.inFlight = true
-			return m, m.sample()
-		}
 	}
 	if m.searching {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		return m, m.updateSearch(msg)
 	}
 	return m, nil
 }
+func (m *Model) scrollOverlay(key string) bool {
+	switch key {
+	case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
+	default:
+		return false
+	}
+	width, height, _ := bodySize(m.width, m.height)
+	limit := max(0, lineCount(m.overlayBody(width))-height)
+	m.overlayScroll = min(m.overlayScroll, limit)
+	switch key {
+	case "up", "k":
+		m.overlayScroll = max(0, m.overlayScroll-1)
+	case "down", "j":
+		m.overlayScroll = min(limit, m.overlayScroll+1)
+	case "pgup":
+		m.overlayScroll = max(0, m.overlayScroll-height)
+	case "pgdown":
+		m.overlayScroll = min(limit, m.overlayScroll+height)
+	case "home":
+		m.overlayScroll = 0
+	case "end":
+		m.overlayScroll = limit
+	}
+	return true
+}
+
+func (m *Model) updateSearch(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	if value := m.input.Value(); value != m.query {
+		m.query = value
+		m.cursor, m.offset = 0, 0
+		m.processPinned = false
+		m.refreshRows()
+	}
+	return cmd
+}
+
 func (m *Model) pageKey(key string) tea.Cmd {
 	switch m.current().Kind {
 	case "processes":
@@ -511,43 +540,54 @@ func (m *Model) pageKey(key string) tea.Cmd {
 	case "network":
 		switch key {
 		case "up", "k":
+			m.scroll = 0
 			m.networkPinned = true
 			m.network = max(0, m.network-1)
 		case "down", "j":
+			m.scroll = 0
 			m.networkPinned = true
 			m.network = min(max(0, len(m.snapshot.Networks)-1), m.network+1)
 		case "home":
-			m.network, m.networkPinned = 0, false
+			m.network, m.networkPinned, m.scroll = 0, false, 0
+		default:
+			m.scrollPage(key)
 		}
 	default:
-		switch key {
-		case "up", "k":
-			m.scroll = max(0, m.scroll-1)
-		case "down", "j":
-			m.scroll++
-		case "pgdown":
-			m.scroll += max(1, m.height-10)
-		case "pgup":
-			m.scroll = max(0, m.scroll-max(1, m.height-10))
-		case "home":
-			m.scroll = 0
-		case "end":
-			m.scroll = m.hardwareScrollMax()
-		}
-		m.scroll = min(m.scroll, m.hardwareScrollMax())
+		m.scrollPage(key)
 	}
 	return nil
 }
+
+func (m *Model) scrollPage(key string) {
+	_, height, _ := bodySize(m.width, m.height)
+	switch key {
+	case "up", "k":
+		m.scroll = max(0, m.scroll-1)
+	case "down", "j":
+		m.scroll++
+	case "pgdown":
+		m.scroll += height
+	case "pgup":
+		m.scroll = max(0, m.scroll-height)
+	case "home":
+		m.scroll = 0
+	case "end":
+		m.scroll = m.hardwareScrollMax()
+		return
+	default:
+		return
+	}
+	m.scroll = min(m.scroll, m.hardwareScrollMax())
+}
 func (m *Model) changeSetting(direction int) {
 	cycle := func(values []int, current int) int {
-		idx := 0
-		for i, v := range values {
-			if v >= current {
-				idx = i
-				break
-			}
+		idx, found := slices.BinarySearch(values, current)
+		if direction < 0 {
+			idx--
+		} else if found {
+			idx++
 		}
-		return values[(idx+direction+len(values))%len(values)]
+		return values[(idx+len(values))%len(values)]
 	}
 	switch m.setting {
 	case 2:
@@ -635,17 +675,23 @@ func (m *Model) styleInput() {
 	}
 }
 
-func (m *Model) selectTab(tab int) {
+func (m *Model) selectTab(tab int) tea.Cmd {
 	if m.current().Kind == "settings" {
 		m.settings = m.savedSettings
 		m.settingsEditing = false
 		m.localizeInput()
 		m.status = ""
 	} else {
-		m.lastTab = m.tab
+		m.lastTab = m.current().ID
 	}
 	m.tab = (tab + len(m.tabs)) % len(m.tabs)
 	m.scroll = 0
+	if m.current().Kind == "processes" && !m.inFlight && !m.paused {
+		m.generation++
+		m.inFlight = true
+		return m.sample()
+	}
+	return nil
 }
 func (m *Model) settingsKey(key string) tea.Cmd {
 	if m.saving {
@@ -653,11 +699,9 @@ func (m *Model) settingsKey(key string) tea.Cmd {
 	}
 	switch key {
 	case "tab":
-		m.selectTab(m.tab + 1)
-		return nil
+		return m.selectTab(m.tab + 1)
 	case "shift+tab":
-		m.selectTab(m.tab - 1)
-		return nil
+		return m.selectTab(m.tab - 1)
 	case "?", "f1":
 		m.help = true
 		m.overlayScroll = 0
@@ -670,9 +714,9 @@ func (m *Model) settingsKey(key string) tea.Cmd {
 	if !m.settingsEditing {
 		switch key {
 		case "left", "h":
-			m.selectTab(m.tab - 1)
+			return m.selectTab(m.tab - 1)
 		case "right", "l":
-			m.selectTab(m.tab + 1)
+			return m.selectTab(m.tab + 1)
 		case "enter":
 			m.settingsEditing = true
 			m.status = ""
@@ -685,7 +729,7 @@ func (m *Model) settingsKey(key string) tea.Cmd {
 			m.setting = settingsCount - 1
 			m.status = ""
 		case "esc":
-			m.selectTab(m.lastTab)
+			return m.selectTab(m.tabIndex(m.lastTab))
 		case "q":
 			return tea.Quit
 		}

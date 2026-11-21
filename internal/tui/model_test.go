@@ -25,7 +25,7 @@ func (s *fakeSource) Detail(_ context.Context, p collector.Process) (collector.D
 func (s *fakeSource) Terminate(context.Context, collector.Process) error { s.killed++; return nil }
 func fixture() collector.Snapshot {
 	now := time.Now()
-	s := collector.Snapshot{At: now, Host: "test-host", CPU: collector.CPU{Name: "Example CPU", Logical: 16, Physical: 8, Percent: 31, Cores: make([]float64, 16)}, Memory: collector.Memory{Total: 32 << 30, Used: 10 << 30, Available: 22 << 30, Modified: 1 << 30, Reclaimable: 8 << 30, Free: 14 << 30, Percent: 31.25}, Disks: []collector.Disk{{ID: "disk0", Name: "disk0", ReadRate: 2 << 20, WriteRate: 1 << 20}}, Networks: []collector.Network{{Name: "en0", Up: true, ReceiveRate: 42, SendRate: 23}}, GPUs: []platform.GPU{platform.EmptyGPU("g0", "Example GPU", "test")}, NPUs: []platform.NPU{platform.EmptyNPU("ane0", "Apple Neural Engine", "test")}, ProcessCount: 3, ProcessesAt: now}
+	s := collector.Snapshot{At: now, Host: "test-host", CPU: collector.CPU{Name: "Example CPU", Logical: 16, Physical: 8, Percent: 31, Cores: make([]float64, 16)}, Memory: collector.Memory{UsageKnown: true, AvailableKnown: true, Total: 32 << 30, Used: 10 << 30, Available: 22 << 30, Modified: 1 << 30, Reclaimable: 8 << 30, Free: 14 << 30, Percent: 31.25}, Disks: []collector.Disk{{ID: "disk0", Name: "disk0", ReadRate: 2 << 20, WriteRate: 1 << 20}}, Networks: []collector.Network{{Name: "en0", Up: true, ReceiveRate: 42, SendRate: 23}}, GPUs: []platform.GPU{platform.EmptyGPU("g0", "Example GPU", "test")}, NPUs: []platform.NPU{platform.EmptyNPU("ane0", "Apple Neural Engine", "test")}, ProcessCount: 3, ProcessesAt: now}
 	s.Processes = []collector.Process{{PID: 1, Name: "init", CPU: 0.1}, {PID: 2, PPID: 1, Name: "worker", CPU: 12, RSS: 40 << 20, Created: 100}, {PID: 3, PPID: 2, Name: "child", CPU: 2}}
 	return s
 }
@@ -162,7 +162,7 @@ func TestPauseAndSelectionPersistence(t *testing.T) {
 	}
 	m.inFlight = false
 	_, cmd := m.Update(tickMsg{})
-	if cmd == nil || m.inFlight {
+	if cmd != nil || m.inFlight {
 		t.Fatal("pause launched sample")
 	}
 }
@@ -607,5 +607,123 @@ func TestLargeCoreScrollingClampsAtLastRow(t *testing.T) {
 	m.Update(key("up"))
 	if m.scroll != end-1 {
 		t.Fatal("scroll became stuck at end")
+	}
+}
+
+func TestPauseFreezesPendingSample(t *testing.T) {
+	for _, resumeEarly := range []bool{false, true} {
+		m, _ := model(t)
+		m.inFlight = true
+		pending := m.sample()
+		before := m.snapshot.At
+		m.Update(key(" "))
+		if resumeEarly {
+			m.Update(key(" "))
+		}
+		_, next := m.Update(pending())
+		if !m.snapshot.At.Equal(before) || len(m.history.Points("cpu")) != 1 {
+			t.Fatal("sample started before pause changed the frozen frame")
+		}
+		if !resumeEarly {
+			if next != nil || m.inFlight {
+				t.Fatal("paused collector scheduled another sample")
+			}
+			_, next = m.Update(key(" "))
+		}
+		if next == nil || !m.inFlight {
+			t.Fatal("resume did not schedule a fresh sample")
+		}
+		m.Update(next())
+		if !m.snapshot.At.After(before) {
+			t.Fatal("fresh sample was lost")
+		}
+	}
+}
+
+func TestPastedProcessFilterAppliesBeforeEnter(t *testing.T) {
+	m, _ := model(t)
+	m.tab = 1
+	m.Update(key("/"))
+	m.Update(tea.PasteMsg{Content: "worker"})
+	m.Update(key("enter"))
+	if m.query != "worker" || len(m.rows) != 1 || m.rows[0].Name != "worker" {
+		t.Fatal("pasted query was not applied", m.query, len(m.rows))
+	}
+}
+
+func TestSelectedTabVisibleAtEveryWidth(t *testing.T) {
+	m, _ := model(t)
+	for _, language := range []string{"en", "zh-CN"} {
+		m.settings.Language = language
+		for w := 20; w < 90; w++ {
+			for i, tab := range m.tabs {
+				m.tab = i
+				if bar := ansi.Strip(m.tabBar(w)); !strings.Contains(bar, m.tabLabel(tab)) {
+					t.Fatalf("current tab %q missing at width %d: %q", m.tabLabel(tab), w, bar)
+				}
+			}
+		}
+	}
+}
+
+func TestSettingsReturnsToSameDeviceAfterHotplug(t *testing.T) {
+	m, _ := model(t)
+	m.tab = 4
+	m.Update(key(","))
+	s := fixture()
+	s.Disks = append([]collector.Disk{{ID: "new"}}, s.Disks...)
+	m.Update(sampleMsg{snapshot: s})
+	m.Update(key("esc"))
+	m.Update(key("esc"))
+	if m.current().ID != "disk:disk0" {
+		t.Fatal("settings returned to", m.current().ID)
+	}
+}
+
+func TestUnknownMemoryNeverDisplaysZeroUsage(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	m.snapshot.Memory = collector.Memory{Limited: true, Total: 1 << 30, Percent: math.NaN()}
+	m.tab = 3
+	for _, output := range []string{m.memoryView(80, 24), m.overview(80, 24), m.compactValue()} {
+		if strings.Contains(ansi.Strip(output), "0 B") {
+			t.Fatal("missing memory counters rendered as zero", ansi.Strip(output))
+		}
+	}
+}
+
+func TestNetworkPageCanReachWrappedAddresses(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	m.Update(tea.WindowSizeMsg{Width: 34, Height: 8})
+	for i, tab := range m.tabs {
+		if tab.Kind == "network" {
+			m.tab = i
+		}
+	}
+	m.snapshot.Networks[0].Addresses = []string{"192.0.2.1/24", "2001:db8::1/64"}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.scroll == 0 {
+		t.Fatal("Page Down did not scroll network details")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, ":1/64") {
+		t.Fatal("last address is unreachable", out)
+	}
+}
+
+func TestSettingsCycleFromCustomInterval(t *testing.T) {
+	m, _ := model(t)
+	m.setting = 2
+	m.settings.IntervalMS = 750
+	m.changeSetting(1)
+	if m.settings.IntervalMS != 1000 {
+		t.Fatal(m.settings.IntervalMS)
+	}
+	m.setting = 3
+	m.settings.RangeSeconds = 10
+	m.changeSetting(1)
+	if m.settings.RangeSeconds != 30 {
+		t.Fatal(m.settings.RangeSeconds)
 	}
 }

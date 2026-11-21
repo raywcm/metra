@@ -23,19 +23,18 @@ func processRows(ps []collector.Process, query, sortBy string, reverse, tree boo
 	keep := make(map[int32]bool, len(ps))
 	for _, p := range ps {
 		if query == "" || strings.Contains(strings.ToLower(p.Name), query) || strings.Contains(strconv.Itoa(int(p.PID)), query) {
-			keep[p.PID] = true
-			if tree {
-				parent := p.PPID
-				seen := map[int32]bool{p.PID: true}
-				for !seen[parent] {
-					seen[parent] = true
-					a, ok := byPID[parent]
-					if !ok {
-						break
-					}
-					keep[parent] = true
-					parent = a.PPID
+			// Once a matching process and its ancestors have been included,
+			// another branch can stop when it reaches that same ancestor.
+			for !keep[p.PID] {
+				keep[p.PID] = true
+				if !tree {
+					break
 				}
+				parent, ok := byPID[p.PPID]
+				if !ok {
+					break
+				}
+				p = parent
 			}
 		}
 	}

@@ -24,12 +24,12 @@ import (
 var version string
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "metra:", err)
 		os.Exit(1)
 	}
 }
-func run() error {
+func run(args []string) error {
 	if version == "" {
 		version = buildinfo.Version()
 	}
@@ -40,12 +40,23 @@ func run() error {
 	language := flags.String("language", "", "UI language: auto, en, zh-CN")
 	theme := flags.String("theme", "", "color theme: auto, dark, light, forest")
 	chartStyle := flags.String("chart-style", "blocks", "compatibility option; only blocks is supported")
-	interval := flags.Duration("interval", 0, "sampling interval (500ms–10s)")
+	var interval time.Duration
+	flags.Func("interval", "sampling interval (500ms–10s)", func(value string) error {
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return err
+		}
+		if duration < config.MinIntervalMS*time.Millisecond || duration > config.MaxIntervalMS*time.Millisecond {
+			return fmt.Errorf("interval must be %d–%d ms", config.MinIntervalMS, config.MaxIntervalMS)
+		}
+		interval = duration
+		return nil
+	})
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "metra — a terminal system monitor for Linux and macOS\n\nUsage: metra [options]")
 		flags.PrintDefaults()
 	}
-	if err := flags.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -79,14 +90,11 @@ func run() error {
 	if *chartStyle != "blocks" {
 		return fmt.Errorf("unsupported chart style %q: only blocks is supported", *chartStyle)
 	}
+	if interval != 0 {
+		settings.IntervalMS = int(interval.Milliseconds())
+	}
 	if err := settings.Validate(); err != nil {
 		return err
-	}
-	if *interval != 0 {
-		settings.IntervalMS = int(interval.Milliseconds())
-		if err := settings.Validate(); err != nil {
-			return err
-		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()

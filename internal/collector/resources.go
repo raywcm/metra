@@ -68,6 +68,7 @@ func applyAllocation(s *Snapshot, limits platform.Limits) {
 	s.CPU.Cores = values
 	s.CPU.IDs = ids
 	s.CPU.Logical = len(values)
+	s.CPU.Percent = missing()
 	if count > 0 {
 		s.CPU.Percent = sum / float64(count)
 	}

@@ -98,7 +98,9 @@ try:
     if args.capture:
         drain(2.0)
         (args.capture/'processes.ansi').write_bytes(all_output)
-    send(b'/metra\r')
+    send(b'/')
+    filtered = send(b'\x1b[200~metra\x1b[201~\r')
+    assert label('Filter: metra', '过滤：metra') in filtered, 'pasted process filter was lost on Enter'
     send(b'\x1b', .2)
     send(b'ts')
     cpu = send(b'\x1b[C')
@@ -122,8 +124,11 @@ try:
     assert label('Memory composition','内存组成') in memory, 'memory composition bar missing'
     if args.capture: (args.capture/'memory.ansi').write_bytes(all_output)
     disk=send(b'\x1b[C')
-    assert label('Combined read/write','总读写') in disk, 'combined disk utilization missing'
-    assert label('Read ','读取 ') in disk and label('Write ','写入 ') in disk, 'disk throughput missing'
+    if label('Disk0', '磁盘0') in all_output:
+        assert label('Combined read/write','总读写') in disk, 'combined disk utilization missing'
+        assert label('Read ','读取 ') in disk and label('Write ','写入 ') in disk, 'disk throughput missing'
+    else:
+        assert label('Volume /', '卷 /') in disk, 'mounted filesystem capacity missing'
     if args.capture: (args.capture/'disk.ansi').write_bytes(all_output)
     gpu_found,npu_found,ascend_found,nvidia_found=False,False,False,False
     nvidia_pages=0

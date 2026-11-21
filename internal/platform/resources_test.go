@@ -158,3 +158,40 @@ func TestV1DisabledMemoryHierarchyDoesNotApplyParentLimit(t *testing.T) {
 		t.Fatal("unrelated non-hierarchical parent limit applied", r)
 	}
 }
+
+func TestSlurmUsageRequiresExactJobIdentity(t *testing.T) {
+	for _, group := range []string{"/slurm/job_123/step_0", "/jobs/job_1234", "/slurm"} {
+		root := t.TempDir()
+		put(t, root, "proc/self/cgroup", "0::"+group+"\n")
+		put(t, root, "proc/self/mountinfo", "1 0 0:1 / /cg rw - cgroup2 cgroup rw\n")
+		put(t, root, "cg"+group+"/cpu.stat", "usage_usec 100\n")
+		put(t, root, "cg"+group+"/memory.current", "100")
+		env := func(k string) string {
+			return map[string]string{"SLURM_JOB_ID": "12", "SLURM_CPUS_PER_TASK": "2", "SLURM_MEM_PER_NODE": "512"}[k]
+		}
+		r := detectLimits(root, nil, env, 8, 8*GiB)
+		if r.MemoryUsageKnown || r.CPUUsageKnown {
+			t.Fatal("attributed unrelated cgroup to job 12", group)
+		}
+	}
+}
+
+func TestHybridCgroupCountersFollowTheirController(t *testing.T) {
+	v1 := "1 0 0:1 / /legacy rw - cgroup cgroup rw,cpu,cpuacct,memory\n"
+	v2 := "2 0 0:2 / /unified rw - cgroup2 cgroup rw\n"
+	for _, mounts := range []string{v1 + v2, v2 + v1} {
+		root := t.TempDir()
+		put(t, root, "proc/self/mountinfo", mounts)
+		put(t, root, "proc/self/cgroup", "0::/session\n1:cpu,cpuacct,memory:/job\n")
+		put(t, root, "legacy/job/cpuacct.usage", "1200")
+		put(t, root, "legacy/job/cpu.cfs_quota_us", "50000")
+		put(t, root, "legacy/job/cpu.cfs_period_us", "100000")
+		put(t, root, "legacy/job/memory.usage_in_bytes", "2048")
+		put(t, root, "legacy/job/memory.limit_in_bytes", "4096")
+		put(t, root, "unified/session/cpu.stat", "usage_usec 300")
+		r := detectLimits(root, []int{0, 1}, noEnv, 2, GiB)
+		if !r.MemoryUsageKnown || r.MemoryCurrent != 2048 || r.CPUUsageNS != 1200 || r.CPUCapacity != .5 {
+			t.Fatalf("wrong counters for mount order %q: %+v", mounts, r)
+		}
+	}
+}

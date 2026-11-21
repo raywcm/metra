@@ -78,3 +78,11 @@ func TestScopedMemoryUsesWorkingSetAndReclaimableHeadroom(t *testing.T) {
 		t.Fatal(s.Memory)
 	}
 }
+
+func TestNoHostAverageWhenAllocatedCoresHaveNoSample(t *testing.T) {
+	s := Snapshot{CPU: CPU{IDs: []int{0, 1}, Cores: []float64{85, math.NaN()}, Percent: 85}}
+	applyAllocation(&s, platform.Limits{AllowedKnown: true, AllowedCPUs: []int{1}, CPUQuota: math.NaN()})
+	if !math.IsNaN(s.CPU.Percent) {
+		t.Fatal("another CPU's usage leaked into allocation", s.CPU.Percent)
+	}
+}

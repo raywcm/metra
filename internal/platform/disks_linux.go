@@ -40,8 +40,17 @@ func MountBelongs(device, disk string) bool {
 	if suffix == name || suffix == "" {
 		return false
 	}
-	if strings.HasPrefix(suffix, "p") {
-		suffix = suffix[1:]
+	// The kernel inserts 'p' before the partition number when the disk
+	// name ends in a digit (e.g. nvme0n1p2 versus the disk nvme0n12).
+	if disk == "" {
+		return false
+	}
+	if last := disk[len(disk)-1]; last >= '0' && last <= '9' {
+		var ok bool
+		suffix, ok = strings.CutPrefix(suffix, "p")
+		if !ok {
+			return false
+		}
 	}
 	for _, r := range suffix {
 		if r < '0' || r > '9' {
