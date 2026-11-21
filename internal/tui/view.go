@@ -18,11 +18,16 @@ func (m *Model) View() tea.View {
 	p := m.palette()
 	var content string
 	if h < 4 {
-		lines := []string{fit(m.compactValue(), w)}
-		for len(lines) < h {
-			lines = append(lines, strings.Repeat(" ", w))
+		body, offset := m.compactValue(), 0
+		switch {
+		case m.modal != "" || m.help:
+			body, offset = m.overlayBody(w), m.overlayScroll
+		case m.current().Kind == "processes":
+			body = m.processView(w, h)
+		case m.current().Kind == "settings" && m.settingsEditing:
+			body, offset = m.settingsView(), m.setting+1
 		}
-		content = strings.Join(lines, "\n")
+		content = viewport(body, offset, w, h, 0)
 	} else {
 		full := w >= 40 && h >= 12
 		bodyW, areaH, padding := bodySize(w, h)
@@ -40,23 +45,14 @@ func (m *Model) View() tea.View {
 		} else if m.ready || m.current().Kind == "settings" {
 			body = m.page(bodyW, areaH)
 		}
-		lines := strings.Split(body, "\n")
-		if len(lines) > areaH {
-			start := 0
-			if m.help || m.modal != "" {
-				start = min(m.overlayScroll, len(lines)-areaH)
-			} else if m.current().Kind == "settings" {
-				start = min(max(0, 1+m.setting-areaH+1), len(lines)-areaH)
-			} else if m.current().Kind != "processes" {
-				start = min(m.scroll, len(lines)-areaH)
-			}
-			lines = lines[start : start+areaH]
-		}
-		for i := range lines {
-			lines[i] = strings.Repeat(" ", padding) + fit(lines[i], bodyW) + strings.Repeat(" ", padding)
-		}
-		for len(lines) < areaH {
-			lines = append(lines, strings.Repeat(" ", w))
+		offset := 0
+		switch {
+		case m.help || m.modal != "":
+			offset = m.overlayScroll
+		case m.current().Kind == "settings":
+			offset = max(0, m.setting+2-areaH)
+		case m.current().Kind != "processes":
+			offset = m.scroll
 		}
 		info := m.status
 		if info == "" {
@@ -78,7 +74,7 @@ func (m *Model) View() tea.View {
 		if full {
 			parts = append(parts, p.border.Render(strings.Repeat("─", w)))
 		}
-		parts = append(parts, strings.Join(lines, "\n"))
+		parts = append(parts, viewport(body, offset, bodyW, areaH, padding))
 		if full {
 			parts = append(parts, p.border.Render(strings.Repeat("─", w)))
 		}
@@ -99,6 +95,23 @@ func (m *Model) View() tea.View {
 	}
 	return v
 }
+
+// Clip and pad the body in display cells, including when it occupies the
+// entire screen and there is no room for the normal header and footer.
+func viewport(body string, offset, width, height, padding int) string {
+	lines := strings.Split(body, "\n")
+	start := min(offset, max(0, len(lines)-height))
+	lines = lines[start:min(start+height, len(lines))]
+	margin := strings.Repeat(" ", padding)
+	for i := range lines {
+		lines[i] = margin + fit(lines[i], width) + margin
+	}
+	for len(lines) < height {
+		lines = append(lines, strings.Repeat(" ", width+2*padding))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m *Model) tabLabel(t Tab) string {
 	switch t.Kind {
 	case "disk":
@@ -964,7 +977,11 @@ func (m *Model) modalView() string {
 	t := m.target
 	switch m.modal {
 	case "confirm":
-		return p.danger.Bold(true).Render(m.tr("End process?")) + m.tr("\n\n%s · PID %d\n\nSend SIGTERM to this process?\nUnsaved work may be lost.\n\n[y] Send SIGTERM    [n / Enter / Esc] Cancel", clean(t.Name), t.PID)
+		title := m.tr("End process?")
+		if _, height, _ := bodySize(m.width, m.height); height <= 3 {
+			title = m.tr("End PID %d? [y/n]", t.PID)
+		}
+		return p.danger.Bold(true).Render(title) + m.tr("\n\n%s · PID %d\n\nSend SIGTERM to this process?\nUnsaved work may be lost.\n\n[y] Send SIGTERM    [n / Enter / Esc] Cancel", clean(t.Name), t.PID)
 	case "loading":
 		return m.tr("Loading process details…\n\nEsc to close")
 	case "terminating":

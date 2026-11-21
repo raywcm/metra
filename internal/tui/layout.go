@@ -261,6 +261,9 @@ func (m *Model) compactValue() string {
 }
 
 func bodySize(width, height int) (int, int, int) {
+	if height < 4 {
+		return max(1, width), max(1, height), 0
+	}
 	if width >= 40 && height >= 12 {
 		return max(1, width-2), max(1, height-5), 1
 	}

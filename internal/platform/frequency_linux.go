@@ -16,6 +16,10 @@ func ReadCPUFrequency(ctx context.Context, ids []int) CPUFrequency {
 }
 
 func readCPUFrequency(ctx context.Context, root, procInfo string, ids []int) CPUFrequency {
+	result := CPUFrequency{MHz: math.NaN(), MinMHz: math.NaN(), MaxMHz: math.NaN()}
+	if len(ids) == 0 || ctx.Err() != nil {
+		return result
+	}
 	allowed := map[int]bool{}
 	for _, id := range ids {
 		allowed[id] = true
@@ -24,13 +28,13 @@ func readCPUFrequency(ctx context.Context, root, procInfo string, ids []int) CPU
 	policies, _ := filepath.Glob(filepath.Join(root, "policy*"))
 	for _, policy := range policies {
 		if ctx.Err() != nil {
-			break
+			return result
 		}
 		current := readNumber(filepath.Join(policy, "scaling_cur_freq")) / 1000
-		if math.IsNaN(current) || current <= 0 {
+		if math.IsNaN(current) || math.IsInf(current, 0) || current <= 0 {
 			current = readNumber(filepath.Join(policy, "cpuinfo_cur_freq")) / 1000
 		}
-		if math.IsNaN(current) || current <= 0 {
+		if math.IsNaN(current) || math.IsInf(current, 0) || current <= 0 {
 			continue
 		}
 		cpus, err := os.ReadFile(filepath.Join(policy, "affected_cpus"))
@@ -39,13 +43,14 @@ func readCPUFrequency(ctx context.Context, root, procInfo string, ids []int) CPU
 		}
 		for _, field := range strings.Fields(string(cpus)) {
 			id, err := strconv.Atoi(field)
-			if err == nil && (len(allowed) == 0 || allowed[id]) {
+			if err == nil && allowed[id] {
 				values[id] = current
 			}
 		}
 	}
-	// x86 kernels often expose current MHz here when cpufreq is unavailable.
-	if len(values) == 0 {
+	// Policies may cover only some allocated CPUs. Keep their readings and
+	// fill the remaining CPUs from procfs when it reports a current MHz value.
+	if len(values) < len(allowed) && ctx.Err() == nil {
 		b, _ := os.ReadFile(procInfo)
 		id := -1
 		for _, line := range strings.Split(string(b), "\n") {
@@ -55,16 +60,22 @@ func readCPUFrequency(ctx context.Context, root, procInfo string, ids []int) CPU
 			}
 			switch strings.TrimSpace(key) {
 			case "processor":
-				id, _ = strconv.Atoi(strings.TrimSpace(value))
+				var err error
+				id, err = strconv.Atoi(strings.TrimSpace(value))
+				if err != nil {
+					id = -1
+				}
 			case "cpu MHz":
 				mhz := metricNumber(value)
-				if id >= 0 && (len(allowed) == 0 || allowed[id]) && mhz > 0 {
+				if _, known := values[id]; !known && allowed[id] && mhz > 0 {
 					values[id] = mhz
 				}
 			}
 		}
 	}
-	result := CPUFrequency{MHz: math.NaN(), MinMHz: math.NaN(), MaxMHz: math.NaN()}
+	if ctx.Err() != nil {
+		return result
+	}
 	var total float64
 	for _, value := range values {
 		total += value

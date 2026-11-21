@@ -40,6 +40,7 @@
   "Volumes": "文件系统",
   "Disk%d": "磁盘%d",
   "Encoder": "编码",
+  "End PID %d? [y/n]": "结束 PID %d？[y/n]",
   "End process?": "结束进程？",
   "Enter / Esc to close": "Enter / Esc 关闭",
   "Enter edit · ←/→ tabs · Esc back · q quit": "Enter 编辑 · ←/→ 切页 · Esc 返回 · q 退出",

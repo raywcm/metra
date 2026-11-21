@@ -43,3 +43,33 @@ func TestCPUFrequencyProcFallbackDoesNotUseBogoMIPS(t *testing.T) {
 		t.Fatal("invented MHz from BogoMIPS")
 	}
 }
+
+func TestFrequencyUsesProcForMissingAllocatedCores(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "policy0")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(dir, "affected_cpus"):    "0",
+		filepath.Join(dir, "scaling_cur_freq"): "2000000",
+		filepath.Join(root, "cpuinfo"):         "processor : 0\ncpu MHz : 1000\n\nprocessor : 1\ncpu MHz : 3000\n\nprocessor : 2\ncpu MHz : 5000\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := readCPUFrequency(context.Background(), root, filepath.Join(root, "cpuinfo"), []int{0, 1})
+	if f.MHz != 2500 || f.MinMHz != 2000 || f.MaxMHz != 3000 {
+		t.Fatal(f)
+	}
+	f = readCPUFrequency(context.Background(), root, filepath.Join(root, "cpuinfo"), nil)
+	if !math.IsNaN(f.MHz) {
+		t.Fatal("empty CPU selection reported host frequency", f)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if f := readCPUFrequency(ctx, root, filepath.Join(root, "cpuinfo"), []int{0}); !math.IsNaN(f.MHz) {
+		t.Fatal("collected after cancellation", f)
+	}
+}

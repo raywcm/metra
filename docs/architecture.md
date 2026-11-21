@@ -67,11 +67,11 @@ CPU 页面在可运行核心数量 ≥64 时只生成数值表，不保留每核
 
 `platform.Engine` 为每个实际可读引擎分配稳定 ID，GPU / NPU 分别保存独立历史。页面根据终端宽度采用单列或双列小图，保持 0–100% 同一量程和深浅方块；数据多时沿用硬件页滚动。显存控制器 / HBM 带宽使用率与设备内存容量条分别显示。
 
-NVIDIA 后端在初次采集时检查驱动的 `--help-query-gpu`，在基本 CSV 字段之外加入支持的引擎和频率字段。缺失属性保持未知；扩展查询不兼容时回退基本查询。AMD 可读取 `pp_dpm_sclk` / `pp_dpm_mclk` 当前标记值，Intel 在接口可见时读取 `gt_cur_freq_mhz`。DRM 设备先过滤 VirtIO / QXL / Bochs / Hyper-V 和 AST / Matrox 管理显示适配器；NVML 工具可用时由其统一枚举 NVIDIA，避免重复 DRM 标签。
+NVIDIA 后端在初次采集时检查驱动的 `--help-query-gpu`，在基本 CSV 字段之外加入支持的引擎和频率字段。缺失属性保持未知。如果字段探测超时，或扩展查询失败，后端会单独执行基本查询，30 秒后再探测可选字段。AMD 可读取 `pp_dpm_sclk` / `pp_dpm_mclk` 当前标记值，Intel 在接口可见时读取 `gt_cur_freq_mhz`。DRM 设备先过滤 VirtIO / QXL / Bochs / Hyper-V 和 AST / Matrox 管理显示适配器；NVML 工具可用时由其统一枚举 NVIDIA，避免重复 DRM 标签。
 
 昇腾后端读取 `npu-smi info` 的真实可见卡 / 芯片编号和 HBM 容量，再以最多四个工作协程查询 `info -t usages` 的 AI Core、AI Vector、AI CPU、控制 CPU 和 HBM 带宽。每个附加查询限制 1.2 秒。驱动的 common / driver 库目录只加入子进程环境，不修改 metra、自身 shell 或系统动态链接配置。采集失败保留已知设备及引擎身份，曲线留下空缺，不填成零或临时撤掉图框。
 
-Linux CPU 频率按实际可运行 CPU ID 与 cpufreq policy 求交，读取当前频率、按关联 CPU 数加权平均，并记录最小 / 最大值。cpufreq 不可用时读取 `/proc/cpuinfo` 的 `cpu MHz`，不使用 BogoMIPS 估算。macOS 只在系统接口报告频率时显示并标明来源。频率放在 CPU 页面头部，不受大核数表格模式影响。
+Linux CPU 频率按实际可运行 CPU ID 与 cpufreq policy 求交，读取当前频率、按关联 CPU 数加权平均，并记录最小 / 最大值。个别可运行核心缺少 cpufreq 读数时，使用 `/proc/cpuinfo` 中该核心的 `cpu MHz` 补齐。macOS 只在系统接口报告频率时显示并标明来源。频率放在 CPU 页面头部，不受大核数表格模式影响。
 
 GPU / NPU 的总体百分比通过 `PeakUtilization` 取各可读引擎中的最大值；NVIDIA 的 GPU / 计算、Ascend 的 AI Core 本身也作为独立引擎保留，避免将峰值误写成某个单独引擎的使用率。总体指标用于总览与总体历史，详细页展示各单元自己的曲线。页面去除配额 / 共享主机 / 主机总量说明，底层归一化与内存上限仍按有效分配计算。
 
@@ -107,4 +107,4 @@ CPU 温度每 2 秒采集。Linux 的 gopsutil sensors 读取 hwmon / thermal；
 
 文件系统在调用 Usage 前过滤 Snap / squashfs、系统伪挂载、boot / EFI、非根 overlay，以及容器挂入的 hosts / hostname / resolv.conf；同设备与文件系统的重复 bind 只保留一份容量，优先根目录。根 overlay 和只读数据文件系统仍保留，APFS Data 与真实数据盘 / 网络存储不因只读而被排除。Linux 的 /dev/mapper 链接会解析到实际 dm 设备后再关联。
 
-网络先按管理状态、地址和已知内部名称过滤；默认路由可以保留容器中唯一的 veth 出口，地址正常的 bond / VLAN / VPN 不会仅因虚拟类型被丢弃。Linux 默认路由每 15 秒读取 proc IPv4 / IPv6 表，列表优先显示默认接口；人工选择按名称跨刷新保留。底层 VPN 与物理接口同时可见时，仅物理层进入总览汇总，VPN 详情仍展示自身计数器；仅有隧道时则使用隧道作为汇总。过滤掉的接口不再保留采样缓存。
+网络先按管理状态、地址和已知内部名称过滤；默认路由可以保留容器中唯一的 veth 出口，地址正常的 bond / VLAN / VPN 不会仅因虚拟类型被丢弃。默认接口每 15 秒刷新一次。Linux 读取 proc 路由表，macOS 分别查询 IPv4 和 IPv6 默认路由。列表优先显示默认接口，手动选择的接口按名称跨刷新保留。底层 VPN 与物理接口同时可见时，仅物理层进入总览汇总，VPN 详情仍展示自身计数器；仅有隧道时则使用隧道作为汇总。过滤掉的接口不再保留采样缓存。

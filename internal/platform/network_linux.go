@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ func defaultInterfaces(ipv4, ipv6 string) map[string]bool {
 	return out
 }
 
-func DefaultInterfaces() map[string]bool {
+func DefaultInterfaces(_ context.Context) map[string]bool {
 	v4, _ := os.ReadFile("/proc/net/route")
 	v6, _ := os.ReadFile("/proc/net/ipv6_route")
 	return defaultInterfaces(string(v4), string(v6))

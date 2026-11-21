@@ -54,15 +54,37 @@ func nvidiaBackend() GPUBackend {
 	}
 	return &nvidia{path: p, extra: newNvidiaExtra()}
 }
-func (n *nvidia) Sample(ctx context.Context) ([]GPU, error) {
-	// Bound external commands independently of per-device native reads. With
-	// many GPUs, NVML must retain the overall collection budget.
+
+// Bound each subprocess separately so a slow optional probe cannot consume
+// the basic query's timeout. The caller's deadline still bounds the sample.
+func (n *nvidia) command(ctx context.Context, args ...string) ([]byte, error) {
 	commandCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
 	defer cancel()
+	cmd := exec.CommandContext(commandCtx, n.path, args...)
+	cmd.WaitDelay = 100 * time.Millisecond
+	output, err := cmd.Output()
+	if commandCtx.Err() != nil {
+		return nil, commandCtx.Err()
+	}
+	return output, err
+}
+
+func (n *nvidia) readDevices(ctx context.Context) ([]GPU, error) {
+	output, err := n.command(ctx, "--query-gpu="+strings.Join(n.query, ","), "--format=csv,noheader,nounits")
+	if err != nil {
+		return nil, err
+	}
+	return parseNVIDIAFields(string(output), n.query)
+}
+
+func (n *nvidia) Sample(ctx context.Context) ([]GPU, error) {
 	if n.query == nil || (!n.retryAfter.IsZero() && time.Now().After(n.retryAfter)) {
 		n.retryAfter = time.Time{}
 		n.query = append([]string(nil), nvidiaBaseQuery...)
-		if help, err := exec.CommandContext(commandCtx, n.path, "--help-query-gpu").Output(); err == nil {
+		help, err := n.command(ctx, "--help-query-gpu")
+		if err != nil {
+			n.retryAfter = time.Now().Add(30 * time.Second)
+		} else {
 			for _, field := range nvidiaOptionalQuery {
 				if strings.Contains(string(help), strconv.Quote(field)) {
 					n.query = append(n.query, field)
@@ -70,24 +92,11 @@ func (n *nvidia) Sample(ctx context.Context) ([]GPU, error) {
 			}
 		}
 	}
-	b, err := exec.CommandContext(commandCtx, n.path, "--query-gpu="+strings.Join(n.query, ","), "--format=csv,noheader,nounits").Output()
-	if commandCtx.Err() != nil {
-		n.query = nil
-		return nil, commandCtx.Err()
-	}
-	var devices []GPU
-	if err == nil {
-		devices, err = parseNVIDIAFields(string(b), n.query)
-	}
-	// Preserve basic monitoring if an older driver or virtualized tool rejects
-	// optional fields that it advertised in its help output.
-	if err != nil && len(n.query) > len(nvidiaBaseQuery) {
+	devices, err := n.readDevices(ctx)
+	if err != nil && ctx.Err() == nil && len(n.query) > len(nvidiaBaseQuery) {
 		n.retryAfter = time.Now().Add(30 * time.Second)
 		n.query = append([]string(nil), nvidiaBaseQuery...)
-		b, err = exec.CommandContext(commandCtx, n.path, "--query-gpu="+strings.Join(n.query, ","), "--format=csv,noheader,nounits").Output()
-		if err == nil {
-			devices, err = parseNVIDIAFields(string(b), n.query)
-		}
+		devices, err = n.readDevices(ctx)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi: %w", err)

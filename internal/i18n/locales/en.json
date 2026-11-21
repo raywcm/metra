@@ -40,6 +40,7 @@
   "Volumes": "Volumes",
   "Disk%d": "Disk%d",
   "Encoder": "Encoder",
+  "End PID %d? [y/n]": "End PID %d? [y/n]",
   "End process?": "End process?",
   "Enter / Esc to close": "Enter / Esc to close",
   "Enter edit · ←/→ tabs · Esc back · q quit": "Enter edit · ←/→ tabs · Esc back · q quit",

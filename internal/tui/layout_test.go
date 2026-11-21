@@ -292,3 +292,33 @@ func TestVolumesAccessibleWithoutDiskCounters(t *testing.T) {
 	}
 	t.Fatal("mounted root volume cannot be inspected")
 }
+
+func TestOneLineProcessActionsRemainVisible(t *testing.T) {
+	m, source := model(t)
+	m.settings.Language = "en"
+	m.tab = m.tabIndex("processes")
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 1})
+	m.Update(key("x"))
+	confirm := ansi.Strip(m.View().Content)
+	if !strings.Contains(confirm, "PID 2") || !strings.Contains(confirm, "y/n") {
+		t.Fatal("missing confirmation", confirm)
+	}
+	m.Update(key("enter"))
+	if source.killed != 0 || m.modal != "" {
+		t.Fatal("Enter did not cancel")
+	}
+	m.Update(key("/"))
+	m.Update(tea.PasteMsg{Content: "worker"})
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "Search › worker") {
+		t.Fatal(out)
+	}
+	m.Update(key("enter"))
+	m.Update(key("?"))
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "Keyboard shortcuts") {
+		t.Fatal(out)
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "Exit metra") {
+		t.Fatal(out)
+	}
+}

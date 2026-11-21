@@ -218,7 +218,7 @@ func (c *Collector) Sample(ctx context.Context, withProcesses bool) Snapshot {
 	warn("network interfaces", e)
 	ifaces := make(map[string]netstat.InterfaceStat)
 	if c.routesAt.IsZero() || now.Sub(c.routesAt) >= 15*time.Second {
-		c.defaultInterfaces = platform.DefaultInterfaces()
+		c.defaultInterfaces = platform.DefaultInterfaces(ctx)
 		c.routesAt = now
 	}
 	visibility := make(map[string]platform.NetworkInfo)

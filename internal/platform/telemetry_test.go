@@ -194,3 +194,40 @@ func TestPCIeCapacityAndFullDuplexUtilization(t *testing.T) {
 		t.Fatal("unknown link capacity guessed")
 	}
 }
+
+func TestNVIDIASlowProbeStillCollectsBasicMetrics(t *testing.T) {
+	for _, slow := range []string{"help", "extended"} {
+		t.Run(slow, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "nvidia-smi")
+			t.Setenv("PROBE_LOG", filepath.Join(dir, "calls"))
+			t.Setenv("SLOW_PROBE", slow)
+			script := `#!/bin/sh
+case "$1" in
+--help-query-gpu)
+	echo help >> "$PROBE_LOG"
+	if [ "$SLOW_PROBE" = help ]; then exec sleep 4; fi
+	echo '"utilization.memory"' ;;
+*utilization.memory*)
+	echo extended >> "$PROBE_LOG"
+	exec sleep 4 ;;
+*) echo 'GPU-1, RTX, 25, 1024, 8192, 60, 150' ;;
+esac
+`
+			if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			n := nvidia{path: path}
+			for range 2 {
+				devices, err := n.Sample(context.Background())
+				if err != nil || len(devices) != 1 || devices[0].Utilization != 25 {
+					t.Fatalf("basic reading lost: %+v %v", devices, err)
+				}
+			}
+			log, err := os.ReadFile(os.Getenv("PROBE_LOG"))
+			if err != nil || strings.Count(string(log), "help") != 1 || strings.Count(string(log), "extended") > 1 {
+				t.Fatalf("failed probe repeated: %q, %v", log, err)
+			}
+		})
+	}
+}
