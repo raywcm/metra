@@ -1,9 +1,10 @@
 package collector
 
 import (
-	"github.com/raywcm/metra/internal/platform"
 	"math"
 	"time"
+
+	"github.com/raywcm/metra/internal/platform"
 )
 
 func (c *Collector) applyResources(s *Snapshot, now time.Time) {
@@ -41,10 +42,17 @@ func applyAllocation(s *Snapshot, limits platform.Limits) {
 	s.Limits = limits
 	s.CPU.Capacity = limits.CPUCapacity
 	s.CPU.HostLogical = max(s.CPU.HostLogical, len(s.CPU.Cores))
-	s.CPU.Scoped = limits.CPUUsageKnown && ((!math.IsNaN(limits.CPUQuota) && limits.CPUQuota <= float64(len(limits.AllowedCPUs))) || limits.SchedulerCPU)
-	allowed := map[int]bool{}
+	hasQuota := !math.IsNaN(limits.CPUQuota)
+	allowed := len(limits.AllowedCPUs)
+	wholeGroupVisible := limits.CPUGroupCPUs > 0 && limits.CPUGroupCPUs <= allowed
+	// A group cpuset can share cores with unrelated groups, even without
+	// a time quota. A narrower per-thread mask alone doesn't bound the group.
+	setScoped := wholeGroupVisible && limits.CPUGroupCPUs < s.CPU.HostLogical
+	quotaScoped := hasQuota && (wholeGroupVisible || limits.CPUQuota <= float64(allowed))
+	s.CPU.Scoped = limits.CPUUsageKnown && (setScoped || quotaScoped || limits.SchedulerCPU)
+	allowedIDs := map[int]bool{}
 	for _, id := range limits.AllowedCPUs {
-		allowed[id] = true
+		allowedIDs[id] = true
 	}
 	var values []float64
 	var ids []int
@@ -55,7 +63,7 @@ func applyAllocation(s *Snapshot, limits platform.Limits) {
 		if i < len(s.CPU.IDs) {
 			id = s.CPU.IDs[i]
 		}
-		if limits.AllowedKnown && !allowed[id] {
+		if limits.AllowedKnown && !allowedIDs[id] {
 			continue
 		}
 		ids = append(ids, id)
@@ -72,7 +80,7 @@ func applyAllocation(s *Snapshot, limits platform.Limits) {
 	if count > 0 {
 		s.CPU.Percent = sum / float64(count)
 	}
-	if !limits.CPUUsageKnown && (!math.IsNaN(limits.CPUQuota) || limits.SchedulerCPU) {
+	if !limits.CPUUsageKnown && (setScoped || hasQuota || limits.SchedulerCPU) {
 		s.CPU.Percent = missing()
 	}
 	if s.CPU.Capacity <= 0 && !limits.AllowedKnown {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/raywcm/metra/internal/collector"
 )
@@ -41,6 +42,25 @@ func TestCompactFooterAndProcessSummary(t *testing.T) {
 		m.tree = true
 		if !strings.Contains(ansi.Strip(m.processView(158, 31)), m.tr("tree (siblings sorted)")) {
 			t.Fatal("tree mode lost its indicator", language)
+		}
+	}
+}
+
+func TestPausedStatusSurvivesCompactWindowAndLongHostname(t *testing.T) {
+	for _, language := range []string{"en", "zh-CN"} {
+		m, _ := model(t)
+		m.settings.Language = language
+		m.snapshot.Host = strings.Repeat("long-host-", 10)
+		m.Update(key(" "))
+		for _, height := range []int{1, 2, 3, 6, 12} {
+			m.Update(tea.WindowSizeMsg{Width: 30, Height: height})
+			if got := ansi.Strip(m.View().Content); !strings.Contains(got, m.tr("PAUSED")) {
+				t.Errorf("%s %d rows: missing pause indicator in %q", language, height, got)
+			}
+		}
+		m.Update(key(" "))
+		if strings.Contains(ansi.Strip(m.View().Content), m.tr("PAUSED")) {
+			t.Fatal("pause indicator survived resume")
 		}
 	}
 }
@@ -113,5 +133,36 @@ func TestDiskDetailsOmitFreeSpaceAndServiceTimes(t *testing.T) {
 				t.Fatal("redundant disk detail retained", language, removed)
 			}
 		}
+	}
+}
+
+func TestProcessHeadingUsesCountFromSameSweep(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	s := m.snapshot
+	s.ProcessCount = 1 // Two PIDs exited after the last full process sweep.
+	m.Update(sampleMsg{snapshot: s})
+	heading := func() string {
+		return strings.SplitN(ansi.Strip(m.processView(100, 20)), "\n", 2)[0]
+	}
+	if h := heading(); !strings.Contains(h, "3 ·") || strings.Contains(h, "3/1") {
+		t.Fatalf("process heading mixed two different sampling times: %q", h)
+	}
+	m.query = "worker"
+	m.refreshRows()
+	if h := heading(); !strings.Contains(h, "1/3") {
+		t.Fatalf("filtered count has the wrong denominator: %q", h)
+	}
+}
+
+func TestUnavailableDiskCountersAndMountCapacity(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	d := &m.snapshot.Disks[0]
+	d.CountersUnavailable = true
+	d.Mounts = []collector.Mount{{Path: "/data", FSType: "ext4", CapacityUnavailable: true}}
+	text := ansi.Strip(m.diskView(0, 110, 28))
+	if !strings.Contains(text, "Total read — · Total written —") || !strings.Contains(text, "/data (ext4) · — / —") {
+		t.Fatal("missing disk data printed as a measured zero", text)
 	}
 }

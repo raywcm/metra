@@ -2,10 +2,12 @@
 package i18n
 
 import (
+	"cmp"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -29,22 +31,46 @@ func load() map[string]map[string]string {
 	return out
 }
 func Resolve(choice string) string {
-	if choice != "" && choice != "auto" {
-		return normalize(choice)
-	}
-	for _, key := range []string{"LC_ALL", "LANGUAGE", "LC_MESSAGES", "LANG"} {
-		if v := os.Getenv(key); v != "" {
-			return normalize(strings.Split(v, ":")[0])
+	if choice == "" || choice == "auto" {
+		choice = cmp.Or(os.Getenv("LC_ALL"), os.Getenv("LC_MESSAGES"), os.Getenv("LANG"))
+		switch localeBase(choice) {
+		case "c", "posix":
+			return "en"
+		}
+		if list := os.Getenv("LANGUAGE"); list != "" {
+			for preference := range strings.SplitSeq(list, ":") {
+				switch localeBase(preference) {
+				case "zh":
+					return "zh-CN"
+				case "en", "c", "posix":
+					return "en"
+				}
+			}
+			return "en"
 		}
 	}
-	return "en"
-}
-func normalize(s string) string {
-	if strings.HasPrefix(strings.ToLower(s), "zh") {
+	if localeBase(choice) == "zh" {
 		return "zh-CN"
 	}
 	return "en"
 }
+
+func localeBase(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if i := strings.IndexAny(tag, "-_.@"); i >= 0 {
+		tag = tag[:i]
+	}
+	return strings.ToLower(tag)
+}
+
+// Count formats an inventory count for both the TUI and text snapshots.
+func Count(value int, available bool) string {
+	if !available {
+		return "—"
+	}
+	return strconv.Itoa(value)
+}
+
 func Text(language, key string, args ...any) string {
 	value := catalogs[Resolve(language)][key]
 	if value == "" {

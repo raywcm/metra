@@ -36,10 +36,15 @@ func newAscendNPU() NPUBackend {
 }
 
 func (a *ascendNPU) command(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, a.path, args...)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.Env = ascendEnvironment(os.Environ(), a.libraryDirs)
 	b, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("npu-smi: %w", ctx.Err())
+	}
 	if err != nil {
 		message := strings.TrimSpace(string(b))
 		if len(message) > 240 {
@@ -94,9 +99,7 @@ func (a *ascendNPU) Sample(ctx context.Context) ([]NPU, error) {
 			defer workers.Done()
 			for i := range jobs {
 				ids := strings.Split(strings.TrimPrefix(devices[i].ID, "ascend:"), ":")
-				queryCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-				data, e := a.command(queryCtx, "info", "-t", "usages", "-i", ids[0], "-c", ids[1])
-				cancel()
+				data, e := a.command(ctx, "info", "-t", "usages", "-i", ids[0], "-c", ids[1])
 				if e == nil {
 					applyAscendUsages(&devices[i], string(data))
 				} else {
@@ -201,10 +204,19 @@ func parseAscendSummary(s string) ([]NPU, error) {
 func applyAscendUsages(n *NPU, s string) {
 	engines := []Engine{}
 	values := map[string]float64{}
+	// The summary and detail commands both report AI Core. A driver can
+	// omit it from the detail table while still reporting other engines.
+	for _, e := range n.Engines {
+		if e.ID == "aicore" {
+			values["Aicore Usage Rate(%)"] = e.Utilization
+		}
+	}
 	for _, line := range strings.Split(s, "\n") {
 		key, value, ok := strings.Cut(line, ":")
 		if ok {
-			values[strings.TrimSpace(key)] = metricNumber(value)
+			if v := metricNumber(value); v >= 0 && v <= 100 {
+				values[strings.TrimSpace(key)] = v
+			}
 		}
 	}
 	for _, spec := range [][3]string{{"Aicore Usage Rate(%)", "aicore", "AI Core"}, {"Aivector Usage Rate(%)", "aivector", "AI Vector"}, {"Aicpu Usage Rate(%)", "aicpu", "AI CPU"}, {"Ctrlcpu Usage Rate(%)", "control", "Control CPU"}, {"HBM Bandwidth Usage Rate(%)", "hbm", "HBM bandwidth"}} {

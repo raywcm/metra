@@ -20,6 +20,7 @@ type Limits struct {
 	MemoryDirtyKnown                                                   bool
 	MemoryLimitKnown                                                   bool
 	AllowedCPUs                                                        []int
+	CPUGroupCPUs                                                       int // Upper bound for the accounting group, before per-thread affinity.
 	CPUCapacity, CPUQuota                                              float64
 	CPURestricted, CPUUsageKnown                                       bool
 	CPUUsageNS                                                         uint64
@@ -204,7 +205,7 @@ func cpuQuota(s string) float64 {
 func detectLimits(root string, affinity []int, env func(string) string, hostCPUs int, hostMemory uint64) Limits {
 	denied := false
 	f := resourceFS{root: root, denied: &denied}
-	r := Limits{CPUQuota: math.NaN(), Scope: "host", AllowedKnown: true}
+	r := Limits{CPUQuota: math.NaN(), Scope: "host", AllowedKnown: true, CPUGroupCPUs: hostCPUs}
 	if len(affinity) == 0 {
 		for i := 0; i < hostCPUs; i++ {
 			affinity = append(affinity, i)
@@ -221,6 +222,12 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 	applyCPU := func(v float64) {
 		if !math.IsNaN(v) && (math.IsNaN(r.CPUQuota) || v < r.CPUQuota) {
 			r.CPUQuota = v
+		}
+	}
+	applyCPUSet := func(ids []int, sameHierarchy bool) {
+		r.AllowedCPUs = intersection(r.AllowedCPUs, ids)
+		if sameHierarchy && (r.CPUGroupCPUs == 0 || len(ids) < r.CPUGroupCPUs) {
+			r.CPUGroupCPUs = len(ids)
 		}
 	}
 	applyMemory := func(limit uint64, current uint64, currentKnown bool, reclaimable uint64) {
@@ -261,7 +268,8 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 			if !ok {
 				continue
 			}
-			if _, legacy := groups["cpu"]; !legacy {
+			_, legacyCPU := groups["cpu"]
+			if !legacyCPU {
 				cpuPath, cpuGroup = path, m.groupIdentity(group)
 			}
 			if _, legacy := groups["memory"]; !legacy {
@@ -270,12 +278,13 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 			for _, dir := range ancestors(path, m.point) {
 				applyCPU(cpuQuota(f.read(filepath.Join(dir, "cpu.max"))))
 				if ids, e := parseCPUList(f.read(filepath.Join(dir, "cpuset.cpus.effective"))); e == nil && len(ids) > 0 {
-					r.AllowedCPUs = intersection(r.AllowedCPUs, ids)
+					applyCPUSet(ids, !legacyCPU)
 				}
 				limit, valid := uintValue(f.read(filepath.Join(dir, "memory.max")))
 				current, known := uintValue(f.read(filepath.Join(dir, "memory.current")))
 				if valid {
-					applyMemory(limit, current, known, reclaimableAt(f, dir, m.kind == "cgroup2"))
+					stat := counters(f.read(filepath.Join(dir, "memory.stat")))
+					applyMemory(limit, current, known, stat["inactive_file"])
 				}
 			}
 			stat := counters(f.read(filepath.Join(path, "cpu.stat")))
@@ -315,19 +324,22 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 				case "cpuset":
 					for _, dir := range ancestors(path, m.point) {
 						if ids, e := parseCPUList(f.read(filepath.Join(dir, "cpuset.cpus"))); e == nil && len(ids) > 0 {
-							r.AllowedCPUs = intersection(r.AllowedCPUs, ids)
+							applyCPUSet(ids, m.controllers["cpu"] && groups["cpu"] == group)
 						}
 					}
 				case "memory":
 					memoryPath, memoryGroup, memoryV2 = path, m.groupIdentity(group), false
 					for _, dir := range ancestors(path, m.point) {
-						if dir != path && f.read(filepath.Join(dir, "memory.use_hierarchy")) == "0" {
+						hierarchical := f.read(filepath.Join(dir, "memory.use_hierarchy")) != "0"
+						if dir != path && !hierarchical {
 							continue
 						}
 						limit, valid := uintValue(f.read(filepath.Join(dir, "memory.limit_in_bytes")))
 						current, known := uintValue(f.read(filepath.Join(dir, "memory.usage_in_bytes")))
 						if valid {
-							applyMemory(limit, current, known, reclaimableAt(f, dir, m.kind == "cgroup2"))
+							stat := counters(f.read(filepath.Join(dir, "memory.stat")))
+							reclaimable, _ := v1MemoryCounter(stat, "inactive_file", hierarchical)
+							applyMemory(limit, current, known, reclaimable)
 						}
 					}
 				}
@@ -346,12 +358,10 @@ func detectLimits(root string, affinity []int, env func(string) string, hostCPUs
 			r.MemoryReclaimable = stat["inactive_file"]
 			r.MemoryDirty, r.MemoryDirtyKnown = stat["file_dirty"]
 		} else {
-			r.MemoryCached, r.MemoryStatsKnown = stat["cache"]
-			r.MemoryReclaimable = stat["total_inactive_file"]
-			if _, ok := stat["total_inactive_file"]; !ok {
-				r.MemoryReclaimable = stat["inactive_file"]
-			}
-			r.MemoryDirty, r.MemoryDirtyKnown = stat["dirty"]
+			hierarchical := f.read(filepath.Join(memoryPath, "memory.use_hierarchy")) != "0"
+			r.MemoryCached, r.MemoryStatsKnown = v1MemoryCounter(stat, "cache", hierarchical)
+			r.MemoryReclaimable, _ = v1MemoryCounter(stat, "inactive_file", hierarchical)
+			r.MemoryDirty, r.MemoryDirtyKnown = v1MemoryCounter(stat, "dirty", hierarchical)
 		}
 	}
 	r.CPUCapacity = float64(len(r.AllowedCPUs))
@@ -433,13 +443,12 @@ func slurmMemoryCPU(env func(string) string) string {
 	return env("SLURM_CPUS_PER_TASK")
 }
 
-func reclaimableAt(f resourceFS, dir string, v2 bool) uint64 {
-	stat := counters(f.read(filepath.Join(dir, "memory.stat")))
-	if v2 {
-		return stat["inactive_file"]
+func v1MemoryCounter(stat map[string]uint64, key string, hierarchical bool) (uint64, bool) {
+	if hierarchical {
+		if value, ok := stat["total_"+key]; ok {
+			return value, true
+		}
 	}
-	if v, ok := stat["total_inactive_file"]; ok {
-		return v
-	}
-	return stat["inactive_file"]
+	value, ok := stat[key]
+	return value, ok
 }

@@ -31,6 +31,36 @@ func TestLocaleDetectionAndFallback(t *testing.T) {
 		t.Fatal("missing key fallback")
 	}
 }
+
+func TestLanguagePreferences(t *testing.T) {
+	for _, tc := range []struct {
+		name, all, messages, lang, preferences, want string
+	}{
+		{"later supported language", "", "", "en_US.UTF-8", "fr:zh_CN:en", "zh-CN"},
+		{"explicit English in list", "", "", "zh_CN", "de:en_GB:zh", "en"},
+		{"empty entries", "", "", "en_US", "::ZH-Hans-CN::", "zh-CN"},
+		{"language list in localized environment", "en_US.UTF-8", "", "", "zh_CN", "zh-CN"},
+		{"C messages", "", "C", "zh_CN", "zh_CN", "en"},
+		{"POSIX locale", "POSIX", "zh_CN", "", "zh_CN", "en"},
+		{"C UTF-8", "", "", "C.UTF-8", "zh_CN", "en"},
+		{"unknown language with similar prefix", "", "", "zhang", "", "en"},
+		{"messages before general locale", "", "en_US", "zh_CN", "", "en"},
+		{"standalone language list", "", "", "", "zh_CN", "zh-CN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LC_ALL", tc.all)
+			t.Setenv("LC_MESSAGES", tc.messages)
+			t.Setenv("LANG", tc.lang)
+			t.Setenv("LANGUAGE", tc.preferences)
+			if got := Resolve("auto"); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+			if Resolve("en") != "en" || Resolve("zh-CN") != "zh-CN" {
+				t.Error("fixed language changed with the environment")
+			}
+		})
+	}
+}
 func TestCatalogCompletenessAndFormatParity(t *testing.T) {
 	en, zh := catalogs["en"], catalogs["zh-CN"]
 	if len(en) < 100 || len(en) != len(zh) {

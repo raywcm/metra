@@ -91,7 +91,7 @@ metra --snapshot
 metra --help
 ```
 
-配置优先保存在 `$XDG_CONFIG_HOME/metra/settings.json`。未设置时，Linux 使用 `~/.config/metra/settings.json`，macOS 使用 `~/Library/Application Support/metra/settings.json`。`--config PATH` 可指定其他文件。
+当 `XDG_CONFIG_HOME` 是绝对路径时，配置保存在 `$XDG_CONFIG_HOME/metra/settings.json`。其他情况下，Linux 使用 `~/.config/metra/settings.json`，macOS 使用 `~/Library/Application Support/metra/settings.json`。`--config PATH` 可指定其他文件。
 
 ## 从源码构建
 

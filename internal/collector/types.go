@@ -38,11 +38,13 @@ type Memory struct {
 	Percent                                             float64
 }
 type Mount struct {
-	Path, FSType      string
-	Total, Used, Free uint64
-	Percent           float64
+	CapacityUnavailable bool
+	Path, FSType        string
+	Total, Used, Free   uint64
+	Percent             float64
 }
 type Disk struct {
+	CountersUnavailable, ServiceTimeOnly     bool
 	CombinedBusy                             float64
 	ReadBusy, WriteBusy                      float64
 	ID, Name                                 string
@@ -51,12 +53,13 @@ type Disk struct {
 	Mounts                                   []Mount
 }
 type Network struct {
-	DefaultRoute, ExcludeFromTotals bool
-	Name                            string
-	Addresses                       []string
-	Up                              bool
-	ReceiveRate, SendRate           float64
-	Received, Sent, Errors, Drops   uint64
+	MetadataUnavailable, CountersUnavailable bool
+	DefaultRoute, ExcludeFromTotals          bool
+	Name                                     string
+	Addresses                                []string
+	Up                                       bool
+	ReceiveRate, SendRate                    float64
+	Received, Sent, Errors, Drops            uint64
 }
 type Process struct {
 	MemoryKnown, ThreadsKnown bool
@@ -73,21 +76,25 @@ type Detail struct {
 	Err                               string
 }
 type Snapshot struct {
-	Limits                 platform.Limits
-	At                     time.Time
-	Host, OS, Arch, Kernel string
-	Uptime                 uint64
-	CPU                    CPU
-	Memory                 Memory
-	Disks                  []Disk
-	Networks               []Network
-	GPUs                   []platform.GPU
-	NPUs                   []platform.NPU
-	Volumes                []Mount
-	Processes              []Process
-	ProcessCount           int
-	ProcessesAt            time.Time
-	Warnings               []string
+	DiskInventoryUnavailable    bool
+	NetworkInventoryUnavailable bool
+	Limits                      platform.Limits
+	At                          time.Time
+	Host, OS, Arch, Kernel      string
+	Uptime                      uint64
+	CPU                         CPU
+	Memory                      Memory
+	Disks                       []Disk
+	Networks                    []Network
+	GPUs                        []platform.GPU
+	NPUs                        []platform.NPU
+	Volumes                     []Mount
+	Processes                   []Process
+	ProcessCount                int
+	ProcessCountUnavailable     bool
+	ProcessListTotal            int // PID count at ProcessesAt, including unreadable processes.
+	ProcessesAt                 time.Time
+	Warnings                    []string
 }
 type Source interface {
 	Sample(context.Context, bool) Snapshot

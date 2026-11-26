@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -46,12 +47,23 @@ func (s Settings) Validate() error {
 	return nil
 }
 func Path() (string, error) {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
 		return filepath.Join(dir, "metra", "settings.json"), nil
 	}
-	dir, err := os.UserConfigDir()
+	var dir string
+	var err error
+	if runtime.GOOS == "linux" {
+		// os.UserConfigDir would read the rejected XDG value again.
+		dir, err = os.UserHomeDir()
+		dir = filepath.Join(dir, ".config")
+	} else {
+		dir, err = os.UserConfigDir()
+	}
 	if err != nil {
 		return "", err
+	}
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("could not determine an absolute user configuration directory")
 	}
 	return filepath.Join(dir, "metra", "settings.json"), nil
 }

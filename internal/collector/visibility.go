@@ -3,33 +3,38 @@ package collector
 import (
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/raywcm/metra/internal/platform"
-	"github.com/shirou/gopsutil/v4/disk"
 )
 
 // One capacity row per filesystem, with / preferred over duplicate bind mounts.
-func usefulPartitions(parts []disk.PartitionStat) []disk.PartitionStat {
-	parts = append([]disk.PartitionStat(nil), parts...)
+func usefulPartitions(parts []mountTarget) []mountTarget {
+	parts = append([]mountTarget(nil), parts...)
 	sort.SliceStable(parts, func(i, j int) bool {
-		if (parts[i].Mountpoint == "/") != (parts[j].Mountpoint == "/") {
-			return parts[i].Mountpoint == "/"
+		if (parts[i].path == "/") != (parts[j].path == "/") {
+			return parts[i].path == "/"
 		}
-		return parts[i].Mountpoint < parts[j].Mountpoint
+		return parts[i].path < parts[j].path
 	})
 	seen := map[string]bool{}
-	var out []disk.PartitionStat
+	var out []mountTarget
 	for _, p := range parts {
-		if !platform.UsefulMount(p.Device, p.Mountpoint, p.Fstype) {
+		if !platform.UsefulMount(p.device, p.path, p.fsType) {
 			continue
 		}
-		device := p.Device
-		if resolved, err := filepath.EvalSymlinks(device); err == nil {
-			device = resolved
-		}
-		key := device + "\x00" + p.Fstype
+		device := p.fsDevice
 		if device == "" {
-			key = p.Mountpoint
+			device = p.device
+			if strings.HasPrefix(device, "/dev/") {
+				if resolved, err := filepath.EvalSymlinks(device); err == nil {
+					device = resolved
+				}
+			}
+		}
+		key := device + "\x00" + p.fsType
+		if device == "" {
+			key = p.path
 		}
 		if seen[key] {
 			continue
@@ -40,29 +45,21 @@ func usefulPartitions(parts []disk.PartitionStat) []disk.PartitionStat {
 	return out
 }
 
-func visibleNetworks(networks []Network, info map[string]platform.NetworkInfo) []Network {
-	var out []Network
+func orderNetworks(networks []Network) {
 	hasPhysical := false
 	for _, n := range networks {
-		meta := info[n.Name]
-		meta.Name = n.Name
-		if !platform.UsefulNetwork(meta) {
-			continue
-		}
-		n.DefaultRoute = meta.DefaultRoute
-		out = append(out, n)
 		if !platform.TunnelNetwork(n.Name) {
 			hasPhysical = true
+			break
 		}
 	}
-	for i := range out {
-		out[i].ExcludeFromTotals = hasPhysical && platform.TunnelNetwork(out[i].Name)
+	for i := range networks {
+		networks[i].ExcludeFromTotals = hasPhysical && platform.TunnelNetwork(networks[i].Name)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].DefaultRoute != out[j].DefaultRoute {
-			return out[i].DefaultRoute
+	sort.Slice(networks, func(i, j int) bool {
+		if networks[i].DefaultRoute != networks[j].DefaultRoute {
+			return networks[i].DefaultRoute
 		}
-		return out[i].Name < out[j].Name
+		return networks[i].Name < networks[j].Name
 	})
-	return out
 }

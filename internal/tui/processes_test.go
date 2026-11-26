@@ -2,9 +2,11 @@ package tui
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/raywcm/metra/internal/collector"
 )
 
@@ -35,12 +37,14 @@ func TestProcessLiveTopAndExplicitSelection(t *testing.T) {
 	s.Processes = []collector.Process{{PID: 10, Created: 100, CPU: math.NaN(), RSS: 1000, MemoryKnown: true}, {PID: 20, Created: 200, CPU: math.NaN(), RSS: 100, MemoryKnown: true}}
 	m.Update(sampleMsg{snapshot: s})
 	s.Processes[0].CPU, s.Processes[1].CPU = 0, 90
+	s.ProcessesAt = s.ProcessesAt.Add(time.Second)
 	m.Update(sampleMsg{snapshot: s})
 	if m.rows[m.cursor].PID != 20 || m.offset != 0 {
 		t.Fatal("initial CPU sample pinned an idle process instead of following the ranking")
 	}
 	m.Update(key("down"))
 	s.Processes[0].CPU, s.Processes[1].CPU = 99, 0
+	s.ProcessesAt = s.ProcessesAt.Add(time.Second)
 	m.Update(sampleMsg{snapshot: s})
 	if m.rows[m.cursor].PID != 10 {
 		t.Fatal("explicitly selected process was lost")
@@ -56,6 +60,7 @@ func TestProcessLiveTopAndExplicitSelection(t *testing.T) {
 			s.Processes[i].Created++
 		}
 	}
+	s.ProcessesAt = s.ProcessesAt.Add(time.Second)
 	m.Update(sampleMsg{snapshot: s})
 	if m.processPinned {
 		t.Fatal("reused PID retained the old process selection")
@@ -78,8 +83,44 @@ func TestNetworkSelectionSurvivesInterfaceReordering(t *testing.T) {
 	if m.snapshot.Networks[m.network].Name != "wg0" {
 		t.Fatal("selected network changed identity")
 	}
-	if total := networkRate([]collector.Network{{ReceiveRate: 20}, {ReceiveRate: 20, ExcludeFromTotals: true}}, true); total != 20 {
+	s.Networks = []collector.Network{{ReceiveRate: 20}, {ReceiveRate: 20, ExcludeFromTotals: true}}
+	if total := networkRate(&s, true); total != 20 {
 		t.Fatal("VPN traffic was counted twice", total)
+	}
+}
+
+func TestUnavailableNetworkReadings(t *testing.T) {
+	m, _ := model(t)
+	m.settings.Language = "en"
+	m.tab = m.tabIndex("network")
+	s := fixture()
+	s.Networks = []collector.Network{
+		{Name: "eth0", Up: true, ReceiveRate: 20, SendRate: 10},
+		{Name: "eth1", ReceiveRate: math.NaN(), SendRate: math.NaN(), MetadataUnavailable: true, CountersUnavailable: true},
+	}
+	m.Update(sampleMsg{snapshot: s})
+	if total := networkRate(&s, true); !math.IsNaN(total) {
+		t.Fatal("partial traffic counted as a complete total", total)
+	}
+	m.Update(key("down"))
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "link state unknown") || !strings.Contains(view, "Traffic counters unavailable") || strings.Contains(view, "Errors 0") {
+		t.Fatal("missing interface information reported as down or zero", view)
+	}
+	s.Networks[1].ExcludeFromTotals = true
+	if total := networkRate(&s, true); total != 20 {
+		t.Fatal("an excluded tunnel suppressed the physical total", total)
+	}
+	s.NetworkInventoryUnavailable = true
+	if total := networkRate(&s, true); !math.IsNaN(total) {
+		t.Fatal("incomplete inventory produced a total", total)
+	}
+	s.Networks = nil
+	m.Update(sampleMsg{snapshot: s})
+	for _, view := range []string{m.compactValue(), m.networkView(80, 18)} {
+		if !strings.Contains(view, "Network interfaces unavailable") {
+			t.Fatal("failed inventory reported as an empty network", view)
+		}
 	}
 }
 
@@ -90,5 +131,23 @@ func BenchmarkDeepProcessTree(b *testing.B) {
 	}
 	for b.Loop() {
 		processRows(processes, "worker", "pid", false, true)
+	}
+}
+
+func TestPinRequiresProcessStartTimeAcrossRefresh(t *testing.T) {
+	m, _ := model(t)
+	m.tab = m.tabIndex("processes")
+	s := fixture()
+	s.Processes = []collector.Process{{PID: 10, Created: 100, CPU: 10}, {PID: 20, CPU: 1}}
+	m.Update(sampleMsg{snapshot: s, withProcesses: true})
+	m.Update(key("down"))
+	m.Update(sampleMsg{snapshot: s, withProcesses: true})
+	if !m.processPinned || m.rows[m.cursor].PID != 20 {
+		t.Fatal("hardware-only refresh moved the cursor within the same process list")
+	}
+	s.ProcessesAt = s.ProcessesAt.Add(time.Second)
+	m.Update(sampleMsg{snapshot: s, withProcesses: true})
+	if m.processPinned || m.rows[m.cursor].PID != 10 {
+		t.Fatal("kept a PID pinned across samples without a verified start time")
 	}
 }

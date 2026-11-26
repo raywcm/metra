@@ -25,8 +25,8 @@ func (s *fakeSource) Detail(_ context.Context, p collector.Process) (collector.D
 func (s *fakeSource) Terminate(context.Context, collector.Process) error { s.killed++; return nil }
 func fixture() collector.Snapshot {
 	now := time.Now()
-	s := collector.Snapshot{At: now, Host: "test-host", CPU: collector.CPU{Name: "Example CPU", Logical: 16, Physical: 8, Percent: 31, Cores: make([]float64, 16)}, Memory: collector.Memory{UsageKnown: true, AvailableKnown: true, Total: 32 << 30, Used: 10 << 30, Available: 22 << 30, Modified: 1 << 30, Reclaimable: 8 << 30, Free: 14 << 30, Percent: 31.25}, Disks: []collector.Disk{{ID: "disk0", Name: "disk0", ReadRate: 2 << 20, WriteRate: 1 << 20}}, Networks: []collector.Network{{Name: "en0", Up: true, ReceiveRate: 42, SendRate: 23}}, GPUs: []platform.GPU{platform.EmptyGPU("g0", "Example GPU", "test")}, NPUs: []platform.NPU{platform.EmptyNPU("ane0", "Apple Neural Engine", "test")}, ProcessCount: 3, ProcessesAt: now}
-	s.Processes = []collector.Process{{PID: 1, Name: "init", CPU: 0.1}, {PID: 2, PPID: 1, Name: "worker", CPU: 12, RSS: 40 << 20, Created: 100}, {PID: 3, PPID: 2, Name: "child", CPU: 2}}
+	s := collector.Snapshot{At: now, Host: "test-host", CPU: collector.CPU{Name: "Example CPU", Logical: 16, Physical: 8, Percent: 31, Cores: make([]float64, 16)}, Memory: collector.Memory{UsageKnown: true, AvailableKnown: true, Total: 32 << 30, Used: 10 << 30, Available: 22 << 30, Modified: 1 << 30, Reclaimable: 8 << 30, Free: 14 << 30, Percent: 31.25}, Disks: []collector.Disk{{ID: "disk0", Name: "disk0", ReadRate: 2 << 20, WriteRate: 1 << 20}}, Networks: []collector.Network{{Name: "en0", Up: true, ReceiveRate: 42, SendRate: 23}}, GPUs: []platform.GPU{platform.EmptyGPU("g0", "Example GPU", "test")}, NPUs: []platform.NPU{platform.EmptyNPU("ane0", "Apple Neural Engine", "test")}, ProcessCount: 3, ProcessListTotal: 3, ProcessesAt: now}
+	s.Processes = []collector.Process{{PID: 1, Created: 10, Name: "init", CPU: 0.1}, {PID: 2, PPID: 1, Name: "worker", CPU: 12, RSS: 40 << 20, Created: 100}, {PID: 3, PPID: 2, Created: 101, Name: "child", CPU: 2}}
 	return s
 }
 func key(s string) tea.KeyPressMsg {
@@ -75,14 +75,61 @@ func TestDynamicTabsKeepDeviceIdentity(t *testing.T) {
 		t.Fatal(m.current())
 	}
 	s.Disks = nil
+	m.scroll = 12
 	m.Update(sampleMsg{snapshot: s})
-	if m.current().Kind != "overview" {
-		t.Fatal("removed device tab retained")
+	if m.current().Kind != "overview" || m.scroll != 0 {
+		t.Fatal("removed device tab or its scroll position retained")
 	}
 	m.tab = len(m.tabs) - 1
 	m.Update(key("right"))
 	if m.tab != 0 {
 		t.Fatal("tab wrap failed")
+	}
+}
+
+func TestProcessDetailIgnoresAnEarlierRequestForTheSamePID(t *testing.T) {
+	m, _ := model(t)
+	m.tab = m.tabIndex("processes")
+	_, first := m.Update(key("d"))
+	old := first().(detailMsg)
+	old.detail.Command = "earlier request"
+	m.Update(key("esc"))
+	if old.request.Err() != context.Canceled {
+		t.Fatal("closing the dialog left its request running")
+	}
+	_, second := m.Update(key("d"))
+	m.Update(old)
+	if m.modal != "loading" {
+		t.Fatal("closed request replaced the pending details for the same PID")
+	}
+	m.Update(second())
+	if m.modal != "detail" || m.detail.Command != "sleep 10" {
+		t.Fatal(m.modal, m.detail)
+	}
+	m.Update(key("enter"))
+	_, pending := m.Update(key("d"))
+	m.Update(key("enter"))
+	m.Update(pending())
+	if m.modal != "" {
+		t.Fatal("Enter failed to dismiss the loading dialog")
+	}
+}
+
+func TestEscapeOnHardwarePageKeepsProcessFilter(t *testing.T) {
+	m, _ := model(t)
+	m.tab = m.tabIndex("processes")
+	m.Update(key("/"))
+	m.Update(tea.PasteMsg{Content: "worker"})
+	m.Update(key("enter"))
+	m.Update(key("right"))
+	m.Update(key("esc"))
+	m.Update(key("left"))
+	if m.query != "worker" || len(m.rows) != 1 {
+		t.Fatal("filter was reset outside the process page", m.query, m.rows)
+	}
+	m.Update(key("esc"))
+	if m.query != "" {
+		t.Fatal("Esc on the process page did not clear the filter")
 	}
 }
 func TestTerminateConfirmationAndDetails(t *testing.T) {
@@ -725,5 +772,108 @@ func TestSettingsCycleFromCustomInterval(t *testing.T) {
 	m.changeSetting(1)
 	if m.settings.RangeSeconds != 30 {
 		t.Fatal(m.settings.RangeSeconds)
+	}
+}
+
+func TestChangingIntervalKeepsRecordedChartGaps(t *testing.T) {
+	for _, original := range []int{1000, 10000} {
+		settings := config.Defaults()
+		settings.IntervalMS = original
+		m := New(context.Background(), &fakeSource{}, settings, "")
+		start := time.Unix(1000, 0)
+		for i := range 2 {
+			msg := m.sample()().(sampleMsg)
+			msg.snapshot.At = start.Add(time.Duration(i) * 10 * time.Second)
+			msg.snapshot.CPU.Percent = 80
+			m.Update(msg)
+		}
+		draw := func() string {
+			return m.graph([]string{"cpu"}, 61, 6, 100, m.palette().cpu)
+		}
+		before := draw()
+		direction := "right"
+		settings.IntervalMS = 1000
+		if original == 1000 {
+			settings.IntervalMS, direction = 10000, "left"
+		}
+		m.Update(key(","))
+		m.setting = 2
+		m.Update(key(direction))
+		m.Update(key(direction))
+		if m.settings.IntervalMS != settings.IntervalMS {
+			t.Fatal("could not select interval", settings.IntervalMS)
+		}
+		_, save := m.Update(key("enter"))
+		m.Update(save())
+		if after := draw(); before != after {
+			t.Errorf("changing interval from %d to %d ms redrew the same history", original, settings.IntervalMS)
+		}
+		points := m.history.Points("cpu")
+		gap := len(points) == 3 && math.IsNaN(points[1].Value)
+		if gap != (original == 1000) {
+			t.Errorf("wrong gap for ten seconds between samples at %d ms: %v", original, points)
+		}
+	}
+}
+
+func TestChangingIntervalReplacesPendingTimer(t *testing.T) {
+	m, _ := model(t)
+	m.savedSettings.IntervalMS = 10000
+	m.settings = m.savedSettings
+	m.snapshot.At = time.Now().Add(-2 * time.Second)
+	old := tickMsg{generation: m.generation}
+	m.Update(key(","))
+	m.setting = 2
+	_, next := m.Update(key("right")) // 10 s wraps to 500 ms.
+	if next == nil || m.generation == old.generation {
+		t.Fatal("previewing a shorter interval left the ten-second timer in charge")
+	}
+	if _, stale := m.Update(old); stale != nil {
+		t.Fatal("old timer started an extra sample")
+	}
+	start := time.Now()
+	msg := next()
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("overdue sample waited for the previous interval")
+	}
+	m.Update(msg)
+	if !m.inFlight {
+		t.Fatal("overdue sample was not started")
+	}
+}
+
+func TestShorterIntervalKeepsValidTimeSpentWaiting(t *testing.T) {
+	settings := config.Defaults()
+	settings.IntervalMS = 10000
+	m := New(context.Background(), &fakeSource{}, settings, "")
+	first := m.sample()().(sampleMsg)
+	first.snapshot.At = time.Now().Add(-4 * time.Second)
+	m.Update(first)
+	m.Update(key(","))
+	m.setting = 2
+	m.Update(key("right"))
+	m.Update(m.sample()())
+	if points := m.history.Points("cpu"); len(points) != 2 {
+		t.Fatalf("four seconds waiting on a ten-second timer became a gap after shortening the interval: %v", points)
+	}
+}
+
+func TestCancelIntervalPreviewRestoresTimer(t *testing.T) {
+	m, _ := model(t)
+	m.Update(key(","))
+	m.setting = 2
+	m.Update(key("right"))
+	draft := tickMsg{generation: m.generation}
+	_, reverted := m.Update(key("esc"))
+	if reverted == nil || m.settings.IntervalMS != 1000 || m.generation == draft.generation {
+		t.Fatal("cancel did not restore the saved sampling cadence")
+	}
+	if _, cmd := m.Update(draft); cmd != nil || m.inFlight {
+		t.Fatal("cancelled preview started a sample")
+	}
+	m.paused = true
+	m.Update(key("enter"))
+	if _, cmd := m.Update(key("right")); cmd != nil || m.inFlight {
+		t.Fatal("changing interval resumed paused sampling")
 	}
 }

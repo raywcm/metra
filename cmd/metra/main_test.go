@@ -34,6 +34,16 @@ func TestSnapshotLanguage(t *testing.T) {
 	}
 }
 
+func TestSnapshotUnavailableInventories(t *testing.T) {
+	for lang, want := range map[string]string{"en": "Disks: —  Interfaces: —  GPUs: 0  NPUs: 0  Processes: —", "zh-CN": "磁盘：—  网络接口：—  GPU：0  NPU：0  进程：—"} {
+		var out bytes.Buffer
+		writeSnapshot(&out, collector.Snapshot{DiskInventoryUnavailable: true, NetworkInventoryUnavailable: true, ProcessCountUnavailable: true}, lang, "test")
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in %s", want, &out)
+		}
+	}
+}
+
 func TestSnapshotDistinguishesUnknownMemoryFromZeroLimit(t *testing.T) {
 	var s collector.Snapshot
 	for _, tc := range []struct {

@@ -14,21 +14,23 @@ type Engine struct {
 // Each engine measures a different resource. The busiest valid engine defines
 // the overall percentage; percentages are never added or averaged together.
 func PeakUtilization(fallback float64, engines []Engine) float64 {
-	peak := math.NaN()
+	if len(engines) == 0 {
+		if validUtilization(fallback) {
+			return fallback
+		}
+		return math.NaN()
+	}
+	peak := 0.0
 	for _, engine := range engines {
-		v := engine.Utilization
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
+		if !validUtilization(engine.Utilization) {
 			return math.NaN()
 		}
-		if math.IsNaN(peak) || v > peak {
-			peak = v
-		}
+		peak = max(peak, engine.Utilization)
 	}
-	if !math.IsNaN(peak) {
-		return peak
-	}
-	return fallback
+	return peak
 }
+
+func validUtilization(value float64) bool { return value >= 0 && value <= 100 }
 
 // Preserve the identity and order of previously readable engines through a
 // temporary query failure. Unknown counters remain gaps, rather than zero.
@@ -78,7 +80,7 @@ func metricNumber(s string) float64 {
 }
 
 func addEngine(out []Engine, id, name string, value float64) []Engine {
-	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+	if !validUtilization(value) {
 		return out
 	}
 	return append(out, Engine{ID: id, Name: name, Utilization: value})
